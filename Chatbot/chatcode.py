@@ -26,7 +26,8 @@ st.set_page_config(page_title = "Senior Companion Chatbot", layout = "centered")
 @st.cache_resource
 def load_emotion_model():
   return pipeline("text-classification",
-                  model = "bhadresh-savani/distilbert-base-uncased-emotion")
+                  model = "bhadresh-savani/distilbert-base-uncased-emotion",
+                  device = -1)  # Force CPU usage
 
 # b) BlenderBot 400M Distill: lightweight, conversational model
 #  - converts user text into numbers to predict reply (in readable text)
@@ -34,17 +35,25 @@ def load_emotion_model():
 def load_chatbot():
   model_name = "facebook/blenderbot-400M-distill"
   tokenizer = AutoTokenizer.from_pretrained(model_name)
-  model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+  model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype="auto")
   return tokenizer, model
 
 # c) Load Whisper for speech to text transcription
 @st.cache_resource
 def load_whisper():
-  return pipeline("automatic-speech-recognition", model = "openai/whisper-small")
+  return pipeline("automatic-speech-recognition", 
+                  model = "openai/whisper-small",
+                  device = -1)  # Force CPU usage
 
-emotion_classifier = load_emotion_model()
-chat_tokenizer, chat_model = load_chatbot()
-whisper_asr = load_whisper()
+# Load models with error handling
+try:
+    emotion_classifier = load_emotion_model()
+    chat_tokenizer, chat_model = load_chatbot()
+    whisper_asr = load_whisper()
+    st.success("✅ All models loaded successfully!")
+except Exception as e:
+    st.error(f"❌ Error loading models: {str(e)}")
+    st.stop()
 
 #3. prepend the emotion tag to input
 def generate_reply(user_input, emotion):
@@ -63,8 +72,10 @@ def generate_reply(user_input, emotion):
 #4. Text-to-Speech (TTS)
 def speak_text(text):
   tts = gTTS(text=text, lang="en")
-  tts.save("reply.mp3")
-  return "reply.mp3"
+  # Use temporary file for better compatibility with Streamlit Cloud
+  with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+    tts.save(tmp_file.name)
+    return tmp_file.name
 
 #5 Stremlit UI (large-font, playable audio of bot's voice)
 st.title("🧓 Senior Companion Chatbot")
