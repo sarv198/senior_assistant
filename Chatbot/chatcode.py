@@ -6,6 +6,7 @@ import tempfile
 import logging
 import torch
 from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
+from streamlit_mic_recorder import mic_recorder
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,24 +33,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Check if imports were successful, if not, app is stopped
-if not IMPORTS_SUCCESS:
-    st.stop()
-
 # Model loading functions with better error handling and optimization
 @st.cache_resource(show_spinner="Loading your personal companion...")
 def load_emotion_model():
     """Load emotion classification model with fallback options."""
-    try:
-        return pipeline(
-            "text-classification",
-            model="bhadresh-savani/distilbert-base-uncased-emotion",
-            device=-1,  # Force CPU usage
-            return_all_scores=False
-        )
-    except Exception as e:
-        logger.error(f"Failed to load emotion model: {e}")
-        return None
+    return pipeline(
+        "text-classification",
+        model="bhadresh-savani/distilbert-base-uncased-emotion",
+        device=-1,  # Force CPU usage
+        return_all_scores=False
+    )
 
 @st.cache_resource(show_spinner="Loading your personal companion...")
 def load_chatbot():
@@ -84,21 +77,11 @@ def load_whisper():
 # Initialize models with progress indicators
 if 'models_loaded' not in st.session_state:
     with st.spinner("Loading AI models... This may take a few minutes on first run."):
-        emotion_classifier = load_emotion_model()
-        chat_tokenizer, chat_model = load_chatbot()
-        whisper_asr = load_whisper()
-        
-        # Check if all models loaded successfully
-        if emotion_classifier and chat_tokenizer and chat_model and whisper_asr:
-            st.session_state.models_loaded = True
-            st.session_state.emotion_classifier = emotion_classifier
-            st.session_state.chat_tokenizer = chat_tokenizer
-            st.session_state.chat_model = chat_model
-            st.session_state.whisper_asr = whisper_asr
-            st.success("✅ All models loaded successfully!")
-        else:
-            st.error("❌ Failed to load some models. Please try again, sorry!")
-            st.stop()
+        st.session_state.emotion_classifier = load_emotion_model()
+        st.session_state.chat_tokenizer, st.session_state.chat_model = load_chatbot()
+        st.session_state.whisper_asr = load_whisper()
+        st.session_state.models_loaded = True
+        st.success("✅ Models loaded successfully!")
 else:
     # Use cached models
     emotion_classifier = st.session_state.emotion_classifier
@@ -133,43 +116,41 @@ def generate_reply(user_input: str, emotion: str) -> str:
             reply = f"I understand you're feeling {emotion.lower()}. How can I help you today?"
             
         return reply
+
     except Exception as e:
         logger.error(f"Error generating reply: {e}")
         return f"I'm here to listen and help. You mentioned feeling {emotion.lower()}. Can you tell me more?"
 
-def process_audio_file(audio_data, is_uploaded: bool = False) -> str:
-    """Process audio file and return transcription."""
+def process_audio_file(uploaded_file) -> str:
+    """Process audio and return transcription."""
     try:
         if is_uploaded and audio_data is not None:
-            # For uploaded files, uploaded bytes saved to temporary file
+            # Uploaded files saved to temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 tmp.write(audio_data.read())
                 tmp_file_path = tmp.name
             transcription = whisper_asr(audio_data.read())
             os.unlink(tmp_path)
-        elif not is_uploaded and audio_data is not None:
-            # For recorded audio, save to temporary file first
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                tmp_file.write(audio_data)
-                tmp_file_path = tmp_file.name
-            
-            try:
-                transcription = whisper_asr(tmp_file_path)
-            finally:
-                # Clean up temporary file
-                if os.path.exists(tmp_file_path):
-                    os.unlink(tmp_file_path)
-        else:
-            return None
-            
+    except Exception as e: 
+        logger.error(f"Error processing file: {e}")
+        return None 
+
+# process audio with Whisper
+def process_audio_bytes(audio_bytes: bytes) -> str:
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+        transcription = whisper_asr(tmp_path)
+        os.unlink(tmp_path)
         return transcription.get("text", "").strip()
     except Exception as e:
         logger.error(f"Error processing audio: {e}")
         return None
 
-# Main UI
-st.title("🧓 Senior Companion Chatbot")
-st.write("Talk or type to the bot. It will respond with empathy and clear speech.")
+# ---------------------------------------------------- Main UI ---------------------------------
+st.title("🧓 GoldenPal")
+st.write("Providing companionship in your golden years, GoldenPal will respond with empathy and clear speech give your speech or text input.")
 
 # Add a sidebar with information
 with st.sidebar:
@@ -177,8 +158,7 @@ with st.sidebar:
     st.write("This chatbot uses AI to:")
     st.write("• 🎭 Detect emotions in your messages")
     st.write("• 💬 Respond with empathy and understanding")
-    st.write("• 🎤 Convert speech to text")
-    st.write("• 🔊 Speak responses back to you")
+    st.write("• 🎤 Live Voice Input")
     
     st.header("🔧 Status")
     if st.session_state.get('models_loaded', False):
@@ -187,123 +167,75 @@ with st.sidebar:
         st.error("❌ Models not loaded")
 
 # Input methods
-st.subheader("🎤 Voice Input")
-st.write("Record your message or upload an audio file:")
-
-# Create columns for better layout
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    try:
-        # Record button with error handling
-        audio_bytes = mic_recorder(
-            start_prompt="🎤 Start Recording",
-            stop_prompt="⏹️ Stop Recording",
-            just_once=False,
-            use_container_width=True,
-            format="wav",
-            key='recorder'
-        )
-    except Exception as e:
-        st.error(f"Microphone recording not available: {e}")
-        audio_bytes = None
-
-with col2:
-    if audio_bytes:
-        st.audio(audio_bytes, format="audio/wav")
-        st.success("✅ Recording captured! Click Submit to process.")
-
-# Alternative: Upload audio file
-st.write("---")
-st.write("**📁 Or upload an audio file:**")
-uploaded_audio = st.file_uploader(
-    "Choose an audio file", 
-    type=['wav', 'mp3', 'flac', 'm4a'], 
-    key='upload',
-    help="Supported formats: WAV, MP3, FLAC, M4A"
+st.subheader("🎤 Live Voice Input")
+audio_bytes = mic_recorder(
+    start_prompt="🎤 Start Recording",
+    stop_prompt="⏹️ Stop Recording",
+    format="wav",
+    just_once=True,
+    key="recorder"
 )
 
-# Text input
+# 📁 Upload audio file
+st.subheader("📁 Upload Audio File")
+uploaded_audio = st.file_uploader(
+    "Choose an audio file",
+    type=['wav', 'mp3', 'flac', 'm4a']
+)
+
+# ⌨️ Text input
 st.subheader("⌨️ Text Input")
 user_input = st.text_area(
-    "Type your message here:", 
+    "Type your message here:",
     height=100,
     placeholder="Tell me how you're feeling or what's on your mind..."
 )
 
-# Process input button
+# 🚀 Submit button
 if st.button("🚀 Submit", type="primary", use_container_width=True):
-    final_input = ""
-    
-    # Process different input types
+    final_input = None
+
     if audio_bytes:
-        st.info("🎤 Processing recorded audio...")
-        final_input = process_audio_file(audio_bytes, is_uploaded=False)
+        st.info("🎤 Processing mic recording...")
+        final_input = process_audio_bytes(audio_bytes)
         if final_input:
-            st.write(f"**Transcribed:** {final_input}")
+            st.write(f"**Transcribed (mic):** {final_input}")
         else:
-            st.error("❌ Failed to transcribe audio. Please try again.")
-            
+            st.error("❌ Failed to transcribe mic recording.")
+
     elif uploaded_audio:
-        st.info("📁 Processing uploaded audio...")
-        final_input = process_audio_file(uploaded_audio, is_uploaded=True)
+        st.info("📁 Processing uploaded file...")
+        final_input = process_audio_file(uploaded_audio)
         if final_input:
-            st.write(f"**Transcribed:** {final_input}")
+            st.write(f"**Transcribed (file):** {final_input}")
         else:
-            st.error("❌ Failed to transcribe audio. Please try again.")
-            
+            st.error("❌ Failed to transcribe uploaded audio.")
+
     elif user_input and user_input.strip():
         final_input = user_input.strip()
     else:
-        st.warning("⚠️ Please provide some input (voice, audio file, or text).")
+        st.warning("⚠️ Please provide input (mic, audio file, or text).")
 
-    # Process the input if we have it
     if final_input:
-        try:
-            with st.spinner("🤖 Analyzing your message..."):
-                # Step 1: Detect emotion
-                emotion_result = emotion_classifier(final_input, top_k=1)[0]
-                detected_emotion = emotion_result['label']
-                confidence = emotion_result['score']
+        with st.spinner("🤖 Analyzing your message..."):
+            emotion_res = emotion_classifier(final_input, top_k=1)[0]
+            detected_emotion = emotion_res.get("label", "other")
+            confidence = emotion_res.get("score", 0.0)
 
-                # Step 2: Generate reply using emotion-aware context
-                reply = generate_reply(final_input, detected_emotion)
+            reply = generate_reply(final_input, detected_emotion)
 
-            # Display results
-            st.success("✅ Analysis complete!")
-            
-            # Show detected emotion and confidence
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Detected Emotion", detected_emotion.title())
-            with col2:
-                st.metric("Confidence", f"{confidence:.1%}")
+        # Show emotion + reply
+        col1, col2 = st.columns(2)
+        col1.metric("Detected Emotion", detected_emotion.title())
+        col2.metric("Confidence", f"{confidence:.1%}")
 
-            # Show reply in large, readable font
-            st.markdown("### 🤖 Bot Response:")
-            st.markdown(f"<div style='font-size:24px; color: #2E8B57; padding: 20px; background-color: #f0f8f0; border-radius: 10px; border-left: 5px solid #2E8B57;'><strong>{reply}</strong></div>", 
-                       unsafe_allow_html=True)
-
-            # Generate and play audio
-            with st.spinner("🔊 Generating speech..."):
-                audio_file_path = speak_text(reply)
-                
-            if audio_file_path:
-                st.audio(audio_file_path, format="audio/mp3")
-                # Clean up audio file
-                try:
-                    if os.path.exists(audio_file_path):
-                        os.unlink(audio_file_path)
-                except Exception as e:
-                    logger.warning(f"Could not clean up audio file: {e}")
-            else:
-                st.warning("⚠️ Could not generate audio. Text response is still available.")
-                
-        except Exception as e:
-            logger.error(f"Error processing input: {e}")
-            st.error(f"❌ An error occurred while processing your message: {str(e)}")
-            st.write("Please try again or check your input.")
-
-# Add footer
-st.write("---")
-st.write("💡 **Tip:** The bot works best with clear speech and complete sentences.")
+        st.markdown(
+            f"""
+            <div style='font-size:26px; color:#2E8B57; padding:20px; 
+            background-color:#f0f8f0; border-radius:10px; 
+            border-left: 5px solid #2E8B57;'>
+            <strong>{reply}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
