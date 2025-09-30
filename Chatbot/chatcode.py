@@ -68,7 +68,7 @@ def speak_text(text):
 
 #5 Stremlit UI (large-font, playable audio of bot's voice)
 st.title("🧓 Senior Companion Chatbot")
-st.write("Talk or type to the bot. It will respond with empty and clear speech.")
+st.write("Talk or type to the bot. It will respond with empathy and clear speech.")
 
 
 #6. a) Voice input using Whisper small model
@@ -104,6 +104,7 @@ user_input = st.text_input("Type here:")
 #7. Process input
 if st.button("Submit"):
   final_input = ""
+  tmp_file_path = None
 
   # check for recorded audio
   if audio_bytes:
@@ -111,40 +112,50 @@ if st.button("Submit"):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
       tmp_file.write(audio_bytes)
       tmp_file_path = tmp_file.name
+    
+    try:
+      # Step 1: transcribe recorded audio with Whisper
+      transcription = whisper_asr(tmp_file_path)
+      final_input = transcription["text"]
+      st.write(f"**Transcribed:** {final_input}")
+    finally:
+      # Clean up temporary file
+      if tmp_file_path and os.path.exists(tmp_file_path):
+        os.unlink(tmp_file_path)
 
-  try:
-    # Step 1: transcribe recorded audio with Whisper
-    transcription = whisper_asr(tmp_file_path)
-    final_input = transcription["text"]
-    st.write(f"**Transcribed:** {final_input}")
-  finally:
-    # Clean up temporary file
-    os.unlink(tmp_file_path)
-
-elif uploaded_audio:
+  elif uploaded_audio:
     # step 1: transcribe uploaded audio with Whisper
     transcription = whisper_asr(uploaded_audio)
     final_input = transcription["text"]
     st.write(f"**Transcribed:** {final_input}")
-elif user_input:
-  final_input = user_input
+  elif user_input:
+    final_input = user_input
 
 if final_input:
-  # step 2: Detect emotion
-  emotion_result = emotion_classifier(final_input, top_k=1)[0]
-  detected_emotion = emotion_result['label']
-  confidence = emotion_result['score']
+  try:
+    # step 2: Detect emotion
+    emotion_result = emotion_classifier(final_input, top_k=1)[0]
+    detected_emotion = emotion_result['label']
+    confidence = emotion_result['score']
 
-  # Step 3: Generate reply using emotion-aware context
-  reply = generate_reply(final_input, detected_emotion)
+    # Step 3: Generate reply using emotion-aware context
+    reply = generate_reply(final_input, detected_emotion)
 
-  # Show detected emotion and confidence
-  st.write(f"**Detected emotion:** {detected_emotion} (confidence: {confidence:.2f})")
+    # Show detected emotion and confidence
+    st.write(f"**Detected emotion:** {detected_emotion} (confidence: {confidence:.2f})")
 
-  # Step 4: Show reply in large font
-  st.markdown(f"<p style='font-size:28px; color: #2E8B57;'><strong>Bot:</strong> {reply}</p>",
-                   unsafe_allow_html=True)
+    # Step 4: Show reply in large font
+    st.markdown(f"<p style='font-size:28px; color: #2E8B57;'><strong>Bot:</strong> {reply}</p>",
+                     unsafe_allow_html=True)
 
-  # Step 5: Play audio
-  audio_file_path = speak_text(reply)
-  st.audio(audio_file_path)
+    # Step 5: Play audio
+    audio_file_path = speak_text(reply)
+    st.audio(audio_file_path)
+    
+    # Clean up audio file
+    if os.path.exists(audio_file_path):
+      os.unlink(audio_file_path)
+      
+  except Exception as e:
+    st.error(f"An error occurred: {str(e)}")
+    st.write("Please try again or check your input.")
