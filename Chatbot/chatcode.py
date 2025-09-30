@@ -1,25 +1,17 @@
+# Imports
+# streamlit for UI, os for temporary files
 import streamlit as st
 import os
 import tempfile
 import logging
-from typing import Optional, Tuple
+import torch
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import with error handling
-try:
-    from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
-    from gtts import gTTS
-    from streamlit_mic_recorder import mic_recorder
-    IMPORTS_SUCCESS = True
-except ImportError as e:
-    st.error(f"❌ Import error: {str(e)}")
-    st.error("Please check your requirements.txt and install missing packages.")
-    IMPORTS_SUCCESS = False
-
-# Core chatbot code
+# list of response styles from GoEmotions based on detected emotion
 response_styles = {
     "joy": "Celebrate with warmth and encouragement.",
     "sadness": "Respond gently, offering comfort and reassurance.",
@@ -40,12 +32,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Check if imports were successful
+# Check if imports were successful, if not, app is stopped
 if not IMPORTS_SUCCESS:
     st.stop()
 
 # Model loading functions with better error handling and optimization
-@st.cache_resource(show_spinner="Loading emotion classifier...")
+@st.cache_resource(show_spinner="Loading your personal companion...")
 def load_emotion_model():
     """Load emotion classification model with fallback options."""
     try:
@@ -59,7 +51,7 @@ def load_emotion_model():
         logger.error(f"Failed to load emotion model: {e}")
         return None
 
-@st.cache_resource(show_spinner="Loading chatbot model...")
+@st.cache_resource(show_spinner="Loading your personal companion...")
 def load_chatbot():
     """Load chatbot model with memory optimization."""
     try:
@@ -67,7 +59,7 @@ def load_chatbot():
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSeq2SeqLM.from_pretrained(
             model_name, 
-            torch_dtype="auto",
+            torch_dtype=torch.float32,
             low_cpu_mem_usage=True
         )
         return tokenizer, model
@@ -105,7 +97,7 @@ if 'models_loaded' not in st.session_state:
             st.session_state.whisper_asr = whisper_asr
             st.success("✅ All models loaded successfully!")
         else:
-            st.error("❌ Failed to load some models. Please check the logs and try again.")
+            st.error("❌ Failed to load some models. Please try again, sorry!")
             st.stop()
 else:
     # Use cached models
@@ -145,27 +137,16 @@ def generate_reply(user_input: str, emotion: str) -> str:
         logger.error(f"Error generating reply: {e}")
         return f"I'm here to listen and help. You mentioned feeling {emotion.lower()}. Can you tell me more?"
 
-def speak_text(text: str) -> Optional[str]:
-    """Convert text to speech and return temporary file path."""
-    try:
-        if not text or len(text.strip()) == 0:
-            return None
-            
-        tts = gTTS(text=text, lang="en", slow=False)
-        # Use temporary file for better compatibility with Streamlit Cloud
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-            tts.save(tmp_file.name)
-            return tmp_file.name
-    except Exception as e:
-        logger.error(f"Error in text-to-speech: {e}")
-        return None
-
-def process_audio_file(audio_data, is_uploaded: bool = False) -> Optional[str]:
+def process_audio_file(audio_data, is_uploaded: bool = False) -> str:
     """Process audio file and return transcription."""
     try:
         if is_uploaded and audio_data is not None:
-            # For uploaded files, read the bytes
+            # For uploaded files, uploaded bytes saved to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(audio_data.read())
+                tmp_file_path = tmp.name
             transcription = whisper_asr(audio_data.read())
+            os.unlink(tmp_path)
         elif not is_uploaded and audio_data is not None:
             # For recorded audio, save to temporary file first
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
