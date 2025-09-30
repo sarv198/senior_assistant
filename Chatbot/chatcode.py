@@ -8,11 +8,11 @@ import torch
 from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 from streamlit_mic_recorder import mic_recorder
 
-# Configure logging
+# Configure logging for errors handling later
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# list of response styles from GoEmotions based on detected emotion
+# list of emotion tags from GoEmotions dataset
 response_styles = {
     "joy": "Celebrate with warmth and encouragement.",
     "sadness": "Respond gently, offering comfort and reassurance.",
@@ -26,14 +26,14 @@ response_styles = {
     "other": "Offer a gentle, open-ended response."
 }
 
-# Initialize Streamlit page config
+# Initialize browser tabe and layout
 st.set_page_config(
     page_title="Senior Companion Chatbot", 
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# Model loading functions with better error handling and optimization
+# models cached between reruns, loads text-classification pipeline
 @st.cache_resource(show_spinner="Loading your personal companion...")
 def load_emotion_model():
     """Load emotion classification model with fallback options."""
@@ -44,6 +44,7 @@ def load_emotion_model():
         return_all_scores=False
     )
 
+# loads BlenderBot model and tokenizer 
 @st.cache_resource(show_spinner="Loading your personal companion...")
 def load_chatbot():
     """Load chatbot model with memory optimization."""
@@ -60,6 +61,7 @@ def load_chatbot():
         logger.error(f"Failed to load chatbot model: {e}")
         return None, None
 
+# loads whisper for speech-to-text transcription
 @st.cache_resource(show_spinner="Loading speech recognition...")
 def load_whisper():
     """Load Whisper model for speech-to-text."""
@@ -74,7 +76,7 @@ def load_whisper():
         logger.error(f"Failed to load Whisper model: {e}")
         return None
 
-# Initialize models with progress indicators
+# models stored in st.session_state for reuse between runs (read back into local variables)
 if 'models_loaded' not in st.session_state:
     with st.spinner("Loading AI models... This may take a few minutes on first run."):
         st.session_state.emotion_classifier = load_emotion_model()
@@ -83,13 +85,14 @@ if 'models_loaded' not in st.session_state:
         st.session_state.models_loaded = True
         st.success("✅ Models loaded successfully!")
 else:
-    # Use cached models
+    # Use cached models in cases above fail
     emotion_classifier = st.session_state.emotion_classifier
     chat_tokenizer = st.session_state.chat_tokenizer
     chat_model = st.session_state.chat_model
     whisper_asr = st.session_state.whisper_asr
 
-# Helper functions with improved error handling
+# creates single-turn prompt that includes detected emotion 
+# also includes a style instruction based on detected emotion
 def generate_reply(user_input: str, emotion: str) -> str:
     """Generate a contextual reply based on user input and detected emotion."""
     try:
