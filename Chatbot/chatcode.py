@@ -1,8 +1,23 @@
 import streamlit as st
-from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
-from gtts import gTTS
-import os, tempfile
-from streamlit_mic_recorder import mic_recorder
+import os
+import tempfile
+import logging
+from typing import Optional, Tuple
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Import with error handling
+try:
+    from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
+    from gtts import gTTS
+    from streamlit_mic_recorder import mic_recorder
+    IMPORTS_SUCCESS = True
+except ImportError as e:
+    st.error(f"❌ Import error: {str(e)}")
+    st.error("Please check your requirements.txt and install missing packages.")
+    IMPORTS_SUCCESS = False
 
 # Core chatbot code
 response_styles = {
@@ -18,155 +33,296 @@ response_styles = {
     "other": "Offer a gentle, open-ended response."
 }
 
-#2. Load Hugging Face Models
-st.set_page_config(page_title = "Senior Companion Chatbot", layout = "centered")
+# Initialize Streamlit page config
+st.set_page_config(
+    page_title="Senior Companion Chatbot", 
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
-# a) We load a DistilBERT model fine-tuned on Google's GoEmotions dataset
-#   - classifies text into one of 10 emotion categories and creates according tag
-@st.cache_resource
-def load_emotion_model():
-  return pipeline("text-classification",
-                  model = "bhadresh-savani/distilbert-base-uncased-emotion",
-                  device = -1)  # Force CPU usage
-
-# b) BlenderBot 400M Distill: lightweight, conversational model
-#  - converts user text into numbers to predict reply (in readable text)
-@st.cache_resource
-def load_chatbot():
-  model_name = "facebook/blenderbot-400M-distill"
-  tokenizer = AutoTokenizer.from_pretrained(model_name)
-  model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype="auto")
-  return tokenizer, model
-
-# c) Load Whisper for speech to text transcription
-@st.cache_resource
-def load_whisper():
-  return pipeline("automatic-speech-recognition", 
-                  model = "openai/whisper-small",
-                  device = -1)  # Force CPU usage
-
-# Load models with error handling
-try:
-    emotion_classifier = load_emotion_model()
-    chat_tokenizer, chat_model = load_chatbot()
-    whisper_asr = load_whisper()
-    st.success("✅ All models loaded successfully!")
-except Exception as e:
-    st.error(f"❌ Error loading models: {str(e)}")
+# Check if imports were successful
+if not IMPORTS_SUCCESS:
     st.stop()
 
-#3. prepend the emotion tag to input
-def generate_reply(user_input, emotion):
-    # Get the appropoiate style instruction based on detected emotion
-    style_instruction = response_styles.get(emotion.lower(), response_styles["other"])
-    context_input = f"The user feels {emotion}. {style_instruction} User said: {user_input}"
-    inputs = chat_tokenizer([context_input], return_tensors="pt")
-    reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7)
-    reply = chat_tokenizer.decode(reply_ids[0], skip_special_tokens=True)
+# Model loading functions with better error handling and optimization
+@st.cache_resource(show_spinner="Loading emotion classifier...")
+def load_emotion_model():
+    """Load emotion classification model with fallback options."""
+    try:
+        return pipeline(
+            "text-classification",
+            model="bhadresh-savani/distilbert-base-uncased-emotion",
+            device=-1,  # Force CPU usage
+            return_all_scores=False
+        )
+    except Exception as e:
+        logger.error(f"Failed to load emotion model: {e}")
+        return None
 
-    if "User said:" in reply:
-      reply = reply.split("User said:")[-1].strip()
+@st.cache_resource(show_spinner="Loading chatbot model...")
+def load_chatbot():
+    """Load chatbot model with memory optimization."""
+    try:
+        model_name = "facebook/blenderbot-400M-distill"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name, 
+            torch_dtype="auto",
+            low_cpu_mem_usage=True
+        )
+        return tokenizer, model
+    except Exception as e:
+        logger.error(f"Failed to load chatbot model: {e}")
+        return None, None
 
-    return reply
+@st.cache_resource(show_spinner="Loading speech recognition...")
+def load_whisper():
+    """Load Whisper model for speech-to-text."""
+    try:
+        return pipeline(
+            "automatic-speech-recognition", 
+            model="openai/whisper-small",
+            device=-1,  # Force CPU usage
+            chunk_length_s=30
+        )
+    except Exception as e:
+        logger.error(f"Failed to load Whisper model: {e}")
+        return None
 
-#4. Text-to-Speech (TTS)
-def speak_text(text):
-  tts = gTTS(text=text, lang="en")
-  # Use temporary file for better compatibility with Streamlit Cloud
-  with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-    tts.save(tmp_file.name)
-    return tmp_file.name
+# Initialize models with progress indicators
+if 'models_loaded' not in st.session_state:
+    with st.spinner("Loading AI models... This may take a few minutes on first run."):
+        emotion_classifier = load_emotion_model()
+        chat_tokenizer, chat_model = load_chatbot()
+        whisper_asr = load_whisper()
+        
+        # Check if all models loaded successfully
+        if emotion_classifier and chat_tokenizer and chat_model and whisper_asr:
+            st.session_state.models_loaded = True
+            st.session_state.emotion_classifier = emotion_classifier
+            st.session_state.chat_tokenizer = chat_tokenizer
+            st.session_state.chat_model = chat_model
+            st.session_state.whisper_asr = whisper_asr
+            st.success("✅ All models loaded successfully!")
+        else:
+            st.error("❌ Failed to load some models. Please check the logs and try again.")
+            st.stop()
+else:
+    # Use cached models
+    emotion_classifier = st.session_state.emotion_classifier
+    chat_tokenizer = st.session_state.chat_tokenizer
+    chat_model = st.session_state.chat_model
+    whisper_asr = st.session_state.whisper_asr
 
-#5 Stremlit UI (large-font, playable audio of bot's voice)
+# Helper functions with improved error handling
+def generate_reply(user_input: str, emotion: str) -> str:
+    """Generate a contextual reply based on user input and detected emotion."""
+    try:
+        # Get the appropriate style instruction based on detected emotion
+        style_instruction = response_styles.get(emotion.lower(), response_styles["other"])
+        context_input = f"The user feels {emotion}. {style_instruction} User said: {user_input}"
+        
+        inputs = chat_tokenizer([context_input], return_tensors="pt", truncation=True, max_length=512)
+        reply_ids = chat_model.generate(
+            **inputs, 
+            max_length=100, 
+            do_sample=True, 
+            temperature=0.7,
+            pad_token_id=chat_tokenizer.eos_token_id
+        )
+        reply = chat_tokenizer.decode(reply_ids[0], skip_special_tokens=True)
+
+        # Clean up the reply
+        if "User said:" in reply:
+            reply = reply.split("User said:")[-1].strip()
+        
+        # Fallback if reply is too short or empty
+        if len(reply.strip()) < 3:
+            reply = f"I understand you're feeling {emotion.lower()}. How can I help you today?"
+            
+        return reply
+    except Exception as e:
+        logger.error(f"Error generating reply: {e}")
+        return f"I'm here to listen and help. You mentioned feeling {emotion.lower()}. Can you tell me more?"
+
+def speak_text(text: str) -> Optional[str]:
+    """Convert text to speech and return temporary file path."""
+    try:
+        if not text or len(text.strip()) == 0:
+            return None
+            
+        tts = gTTS(text=text, lang="en", slow=False)
+        # Use temporary file for better compatibility with Streamlit Cloud
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+            tts.save(tmp_file.name)
+            return tmp_file.name
+    except Exception as e:
+        logger.error(f"Error in text-to-speech: {e}")
+        return None
+
+def process_audio_file(audio_data, is_uploaded: bool = False) -> Optional[str]:
+    """Process audio file and return transcription."""
+    try:
+        if is_uploaded and audio_data is not None:
+            # For uploaded files, read the bytes
+            transcription = whisper_asr(audio_data.read())
+        elif not is_uploaded and audio_data is not None:
+            # For recorded audio, save to temporary file first
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                tmp_file.write(audio_data)
+                tmp_file_path = tmp_file.name
+            
+            try:
+                transcription = whisper_asr(tmp_file_path)
+            finally:
+                # Clean up temporary file
+                if os.path.exists(tmp_file_path):
+                    os.unlink(tmp_file_path)
+        else:
+            return None
+            
+        return transcription.get("text", "").strip()
+    except Exception as e:
+        logger.error(f"Error processing audio: {e}")
+        return None
+
+# Main UI
 st.title("🧓 Senior Companion Chatbot")
 st.write("Talk or type to the bot. It will respond with empathy and clear speech.")
 
+# Add a sidebar with information
+with st.sidebar:
+    st.header("ℹ️ About")
+    st.write("This chatbot uses AI to:")
+    st.write("• 🎭 Detect emotions in your messages")
+    st.write("• 💬 Respond with empathy and understanding")
+    st.write("• 🎤 Convert speech to text")
+    st.write("• 🔊 Speak responses back to you")
+    
+    st.header("🔧 Status")
+    if st.session_state.get('models_loaded', False):
+        st.success("✅ All models loaded")
+    else:
+        st.error("❌ Models not loaded")
 
-#6. a) Voice input using Whisper small model
-st.subheader("🎤 Speak to the bot")
+# Input methods
+st.subheader("🎤 Voice Input")
+st.write("Record your message or upload an audio file:")
 
-# c) Creating columns for better layout
-col1, col2 = st.columns([1,3])
+# Create columns for better layout
+col1, col2 = st.columns([1, 2])
 
 with col1:
-  # Record button
-  audio_bytes = mic_recorder(
-      start_prompt = "🎤 Start Recording",
-      stop_prompt = "⏹️ Stop Recording",
-      just_once=False,
-      use_container_width=True,
-      format="wav",
-      key='recorder'
-  )
+    try:
+        # Record button with error handling
+        audio_bytes = mic_recorder(
+            start_prompt="🎤 Start Recording",
+            stop_prompt="⏹️ Stop Recording",
+            just_once=False,
+            use_container_width=True,
+            format="wav",
+            key='recorder'
+        )
+    except Exception as e:
+        st.error(f"Microphone recording not available: {e}")
+        audio_bytes = None
 
 with col2:
-  if audio_bytes:
-    st.audio(audio_bytes, format="audio/wav")
-    st.success("✅ Recording captured! Click Submit to process.")
+    if audio_bytes:
+        st.audio(audio_bytes, format="audio/wav")
+        st.success("✅ Recording captured! Click Submit to process.")
 
-# Alternative method if streamlit-mic-recorder is not available
+# Alternative: Upload audio file
 st.write("---")
-st.write("**Alternative: Upload audio file**")
-uploaded_audio = st.file_uploader("Or upload an audio file", type=['wav', 'mp3', 'flac'], key='upload')
+st.write("**📁 Or upload an audio file:**")
+uploaded_audio = st.file_uploader(
+    "Choose an audio file", 
+    type=['wav', 'mp3', 'flac', 'm4a'], 
+    key='upload',
+    help="Supported formats: WAV, MP3, FLAC, M4A"
+)
 
-st.subheader("⌨️ Or type your message")
-user_input = st.text_input("Type here:")
+# Text input
+st.subheader("⌨️ Text Input")
+user_input = st.text_area(
+    "Type your message here:", 
+    height=100,
+    placeholder="Tell me how you're feeling or what's on your mind..."
+)
 
-#7. Process input
-if st.button("Submit"):
-  final_input = ""
-  tmp_file_path = None
-
-  # check for recorded audio
-  if audio_bytes:
-    # save audio bytes to temporary file for processing
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-      tmp_file.write(audio_bytes)
-      tmp_file_path = tmp_file.name
+# Process input button
+if st.button("🚀 Submit", type="primary", use_container_width=True):
+    final_input = ""
     
-    try:
-      # Step 1: transcribe recorded audio with Whisper
-      transcription = whisper_asr(tmp_file_path)
-      final_input = transcription["text"]
-      st.write(f"**Transcribed:** {final_input}")
-    finally:
-      # Clean up temporary file
-      if tmp_file_path and os.path.exists(tmp_file_path):
-        os.unlink(tmp_file_path)
+    # Process different input types
+    if audio_bytes:
+        st.info("🎤 Processing recorded audio...")
+        final_input = process_audio_file(audio_bytes, is_uploaded=False)
+        if final_input:
+            st.write(f"**Transcribed:** {final_input}")
+        else:
+            st.error("❌ Failed to transcribe audio. Please try again.")
+            
+    elif uploaded_audio:
+        st.info("📁 Processing uploaded audio...")
+        final_input = process_audio_file(uploaded_audio, is_uploaded=True)
+        if final_input:
+            st.write(f"**Transcribed:** {final_input}")
+        else:
+            st.error("❌ Failed to transcribe audio. Please try again.")
+            
+    elif user_input and user_input.strip():
+        final_input = user_input.strip()
+    else:
+        st.warning("⚠️ Please provide some input (voice, audio file, or text).")
 
-  elif uploaded_audio:
-    # step 1: transcribe uploaded audio with Whisper
-    transcription = whisper_asr(uploaded_audio)
-    final_input = transcription["text"]
-    st.write(f"**Transcribed:** {final_input}")
-  elif user_input:
-    final_input = user_input
+    # Process the input if we have it
+    if final_input:
+        try:
+            with st.spinner("🤖 Analyzing your message..."):
+                # Step 1: Detect emotion
+                emotion_result = emotion_classifier(final_input, top_k=1)[0]
+                detected_emotion = emotion_result['label']
+                confidence = emotion_result['score']
 
-if final_input:
-  try:
-    # step 2: Detect emotion
-    emotion_result = emotion_classifier(final_input, top_k=1)[0]
-    detected_emotion = emotion_result['label']
-    confidence = emotion_result['score']
+                # Step 2: Generate reply using emotion-aware context
+                reply = generate_reply(final_input, detected_emotion)
 
-    # Step 3: Generate reply using emotion-aware context
-    reply = generate_reply(final_input, detected_emotion)
+            # Display results
+            st.success("✅ Analysis complete!")
+            
+            # Show detected emotion and confidence
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Detected Emotion", detected_emotion.title())
+            with col2:
+                st.metric("Confidence", f"{confidence:.1%}")
 
-    # Show detected emotion and confidence
-    st.write(f"**Detected emotion:** {detected_emotion} (confidence: {confidence:.2f})")
+            # Show reply in large, readable font
+            st.markdown("### 🤖 Bot Response:")
+            st.markdown(f"<div style='font-size:24px; color: #2E8B57; padding: 20px; background-color: #f0f8f0; border-radius: 10px; border-left: 5px solid #2E8B57;'><strong>{reply}</strong></div>", 
+                       unsafe_allow_html=True)
 
-    # Step 4: Show reply in large font
-    st.markdown(f"<p style='font-size:28px; color: #2E8B57;'><strong>Bot:</strong> {reply}</p>",
-                     unsafe_allow_html=True)
+            # Generate and play audio
+            with st.spinner("🔊 Generating speech..."):
+                audio_file_path = speak_text(reply)
+                
+            if audio_file_path:
+                st.audio(audio_file_path, format="audio/mp3")
+                # Clean up audio file
+                try:
+                    if os.path.exists(audio_file_path):
+                        os.unlink(audio_file_path)
+                except Exception as e:
+                    logger.warning(f"Could not clean up audio file: {e}")
+            else:
+                st.warning("⚠️ Could not generate audio. Text response is still available.")
+                
+        except Exception as e:
+            logger.error(f"Error processing input: {e}")
+            st.error(f"❌ An error occurred while processing your message: {str(e)}")
+            st.write("Please try again or check your input.")
 
-    # Step 5: Play audio
-    audio_file_path = speak_text(reply)
-    st.audio(audio_file_path)
-    
-    # Clean up audio file
-    if os.path.exists(audio_file_path):
-      os.unlink(audio_file_path)
-      
-  except Exception as e:
-    st.error(f"An error occurred: {str(e)}")
-    st.write("Please try again or check your input.")
+# Add footer
+st.write("---")
+st.write("💡 **Tip:** The bot works best with clear speech and complete sentences.")
