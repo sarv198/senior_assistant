@@ -1,4 +1,3 @@
-# Imports
 import streamlit as st
 import os
 import tempfile
@@ -7,11 +6,10 @@ import torch
 from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 from streamlit_mic_recorder import mic_recorder
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Expanded emotion mapping with more nuanced responses
+# Emotion response styles
 response_styles = {
     "joy": "Celebrate with warmth and encouragement.",
     "sadness": "Respond gently, offering comfort and reassurance.",
@@ -22,284 +20,155 @@ response_styles = {
     "confusion": "Provide a simple, clear explanation.",
     "optimism": "Encourage positivity and motivation.",
     "neutral": "Respond in a straightforward and balanced way.",
-    "disgust": "Acknowledge concern and offer understanding.",
-    "admiration": "Share in the appreciation warmly.",
-    "disappointment": "Offer understanding and gentle encouragement.",
     "curiosity": "Engage with interest and provide helpful information.",
     "other": "Offer a gentle, open-ended response."
 }
 
-# Initialize browser tab and layout
-st.set_page_config(
-    page_title="Senior Companion Chatbot", 
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+# Emotion mapping from GoEmotions to response styles
+emotion_map = {
+    'admiration': 'joy', 'amusement': 'joy', 'anger': 'anger', 'annoyance': 'anger',
+    'approval': 'optimism', 'caring': 'love', 'confusion': 'confusion', 'curiosity': 'curiosity',
+    'desire': 'optimism', 'disappointment': 'sadness', 'disapproval': 'anger', 'disgust': 'anger',
+    'embarrassment': 'fear', 'excitement': 'joy', 'fear': 'fear', 'gratitude': 'love',
+    'grief': 'sadness', 'joy': 'joy', 'love': 'love', 'nervousness': 'fear',
+    'optimism': 'optimism', 'pride': 'joy', 'realization': 'surprise', 'relief': 'joy',
+    'remorse': 'sadness', 'sadness': 'sadness', 'surprise': 'surprise', 'neutral': 'neutral'
+}
 
-# Improved emotion detection with ensemble approach
-@st.cache_resource(show_spinner="Loading emotion detection...")
-def load_emotion_model():
-    """Load emotion classification model - using GoEmotions for better coverage."""
-    try:
-        # This model is specifically trained on GoEmotions dataset with 28 emotions
-        return pipeline(
-            "text-classification",
-            model="SamLowe/roberta-base-go_emotions",
-            device=-1,
-            top_k=None  # Return all scores for better analysis
-        )
-    except Exception as e:
-        logger.error(f"Failed to load GoEmotions model, falling back: {e}")
-        # Fallback to original model
-        return pipeline(
-            "text-classification",
-            model="bhadresh-savani/distilbert-base-uncased-emotion",
-            device=-1,
-            return_all_scores=True
-        )
+st.set_page_config(page_title="Senior Companion Chatbot", layout="centered", initial_sidebar_state="collapsed")
 
-@st.cache_resource(show_spinner="Loading your personal companion...")
-def load_chatbot():
-    """Load chatbot model with memory optimization."""
+@st.cache_resource(show_spinner="Loading models...")
+def load_models():
+    """Load all AI models."""
     try:
-        model_name = "facebook/blenderbot-400M-distill"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name, 
-            torch_dtype=torch.float32,
-            low_cpu_mem_usage=True
-        )
-        return tokenizer, model
+        emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
+        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
+        return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
-        logger.error(f"Failed to load chatbot model: {e}")
-        return None, None
-
-@st.cache_resource(show_spinner="Loading speech recognition...")
-def load_whisper():
-    """Load Whisper model for speech-to-text."""
-    try:
-        return pipeline(
-            "automatic-speech-recognition", 
-            model="openai/whisper-small",
-            device=-1,
-            chunk_length_s=30
-        )
-    except Exception as e:
-        logger.error(f"Failed to load Whisper model: {e}")
-        return None
+        logger.error(f"Model loading error: {e}")
+        return None, None, None, None
 
 # Initialize models
 if 'models_loaded' not in st.session_state:
-    with st.spinner("Loading AI models... This may take a few minutes on first run."):
-        st.session_state.emotion_classifier = load_emotion_model()
-        st.session_state.chat_tokenizer, st.session_state.chat_model = load_chatbot()
-        st.session_state.whisper_asr = load_whisper()
+    with st.spinner("Loading AI models..."):
+        st.session_state.emotion_clf, st.session_state.tokenizer, st.session_state.chat_model, st.session_state.whisper = load_models()
         st.session_state.models_loaded = True
-        st.success("✅ Models loaded successfully!")
 
-emotion_classifier = st.session_state.emotion_classifier
-chat_tokenizer = st.session_state.chat_tokenizer
+emotion_clf = st.session_state.emotion_clf
+tokenizer = st.session_state.tokenizer
 chat_model = st.session_state.chat_model
-whisper_asr = st.session_state.whisper_asr
+whisper = st.session_state.whisper
 
-def detect_emotion_advanced(text: str) -> tuple:
-    """
-    Advanced emotion detection with better handling of neutral and ambiguous statements.
-    Returns: (primary_emotion, confidence, all_emotions_dict)
-    """
+def detect_emotion(text):
+    """Detect emotion with improved neutral/confusion handling."""
     try:
-        # Get all emotion scores
-        results = emotion_classifier(text)
+        results = emotion_clf(text)
         
-        # Convert to dictionary for easier processing
-        emotion_scores = {item['label']: item['score'] for item in results}
-        
-        # Get top emotion
-        top_emotion = max(emotion_scores.items(), key=lambda x: x[1])
-        primary_emotion = top_emotion[0]
-        confidence = top_emotion[1]
-        
-        # Special handling for low-confidence predictions
-        # If confidence is low and emotions are distributed, classify as neutral or confusion
-        if confidence < 0.4:
-            # Check if input contains question words
-            question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
-            if any(word in text.lower() for word in question_words):
-                primary_emotion = "curiosity"
+        # Handle both list and dict formats from the classifier
+        if isinstance(results, list) and len(results) > 0:
+            if isinstance(results[0], list):
+                # Model returns list of lists
+                scores = {item['label']: item['score'] for item in results[0]}
             else:
-                primary_emotion = "neutral"
+                # Model returns list of dicts
+                scores = {item['label']: item['score'] for item in results}
+        else:
+            scores = {}
         
-        # Detect confusion patterns
-        confusion_indicators = ['confused', 'don\'t understand', 'not sure', 'unclear', 
-                               'what do you mean', 'i don\'t get', 'huh', 'what']
-        if any(indicator in text.lower() for indicator in confusion_indicators):
-            primary_emotion = "confusion"
-            confidence = max(confidence, 0.7)  # Boost confidence for clear confusion markers
+        if not scores:
+            return "neutral", 0.5, {}
         
-        # Detect neutral statements (factual, informational)
-        neutral_patterns = ['the weather', 'today is', 'i am here', 'this is', 
-                           'i need to', 'i have to', 'i will', 'i went']
-        if any(pattern in text.lower() for pattern in neutral_patterns) and confidence < 0.5:
-            primary_emotion = "neutral"
-            confidence = 0.6
+        emotion, conf = max(scores.items(), key=lambda x: x[1])
         
-        # Map GoEmotions labels to our response styles
-        emotion_mapping = {
-            'admiration': 'admiration',
-            'amusement': 'joy',
-            'anger': 'anger',
-            'annoyance': 'anger',
-            'approval': 'optimism',
-            'caring': 'love',
-            'confusion': 'confusion',
-            'curiosity': 'curiosity',
-            'desire': 'optimism',
-            'disappointment': 'disappointment',
-            'disapproval': 'anger',
-            'disgust': 'disgust',
-            'embarrassment': 'fear',
-            'excitement': 'joy',
-            'fear': 'fear',
-            'gratitude': 'love',
-            'grief': 'sadness',
-            'joy': 'joy',
-            'love': 'love',
-            'nervousness': 'fear',
-            'optimism': 'optimism',
-            'pride': 'joy',
-            'realization': 'surprise',
-            'relief': 'joy',
-            'remorse': 'sadness',
-            'sadness': 'sadness',
-            'surprise': 'surprise',
-            'neutral': 'neutral'
-        }
+        # Handle low confidence
+        if conf < 0.4:
+            question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
+            emotion = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
         
-        # Map to our response styles
-        mapped_emotion = emotion_mapping.get(primary_emotion, primary_emotion)
-        if mapped_emotion not in response_styles:
-            mapped_emotion = 'other'
+        # Detect confusion
+        confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
+        if any(w in text.lower() for w in confusion_words):
+            emotion, conf = "confusion", max(conf, 0.7)
         
-        return mapped_emotion, confidence, emotion_scores
+        # Detect neutral statements (only very obvious factual statements)
+        neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
+        if any(p in text.lower() for p in neutral_patterns) and conf < 0.4:
+            emotion, conf = "neutral", 0.6
+        
+        # Map to response styles
+        mapped = emotion_map.get(emotion, 'other')
+        return mapped if mapped in response_styles else 'other', conf, scores
         
     except Exception as e:
-        logger.error(f"Error in emotion detection: {e}")
+        logger.error(f"Emotion detection error: {e}")
         return "neutral", 0.5, {}
 
-def generate_reply(user_input: str, emotion: str, confidence: float) -> str:
-    """Generate a contextual reply based on user input and detected emotion."""
+def generate_reply(text, emotion1, emotion2, conf):
+    """Generate empathetic reply."""
     try:
-        # Get the appropriate style instruction
-        style_instruction = response_styles.get(emotion.lower(), response_styles["other"])
+        style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
-        # Adjust prompt based on confidence
-        if confidence < 0.5:
-            context_input = f"Respond naturally and warmly. User said: {user_input}"
+        if emotion2:
+            style2 = response_styles.get(emotion2.lower(), response_styles["other"])
+            context = f"The user feels {emotion1} and {emotion2}. {style1} Also, {style2} User said: {text}"
+        elif conf < 0.5:
+            context = f"Respond naturally and warmly. User said: {text}"
         else:
-            context_input = f"The user feels {emotion}. {style_instruction} User said: {user_input}"
+            context = f"The user feels {emotion1}. {style1} User said: {text}"
         
-        inputs = chat_tokenizer([context_input], return_tensors="pt", truncation=True, max_length=512)
-        reply_ids = chat_model.generate(
-            **inputs, 
-            max_length=100, 
-            do_sample=True, 
-            temperature=0.7,
-            pad_token_id=chat_tokenizer.eos_token_id
-        )
-        reply = chat_tokenizer.decode(reply_ids[0], skip_special_tokens=True)
-
-        # Clean up the reply
+        inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
+        reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
+        
         if "User said:" in reply:
             reply = reply.split("User said:")[-1].strip()
         
-        # Fallback if reply is too short or empty
-        if len(reply.strip()) < 3:
-            reply = f"I'm here to listen. Tell me more about what's on your mind."
-            
-        return reply
-
+        return reply if len(reply.strip()) >= 3 else "I'm here to listen. Tell me more about what's on your mind."
     except Exception as e:
-        logger.error(f"Error generating reply: {e}")
+        logger.error(f"Reply generation error: {e}")
         return "I'm here to listen and help. Can you tell me more?"
 
-def process_audio_bytes(audio_bytes: bytes) -> str:
-    """Process audio bytes and return transcription."""
+def process_audio(audio_data, is_bytes=True):
+    """Process audio and return transcription."""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes)
+            tmp.write(audio_data if is_bytes else audio_data.read())
             tmp_path = tmp.name
-        transcription = whisper_asr(tmp_path)
+        result = whisper(tmp_path)
         os.unlink(tmp_path)
-        return transcription.get("text", "").strip()
+        return result.get("text", "").strip()
     except Exception as e:
-        logger.error(f"Error processing audio: {e}")
+        logger.error(f"Audio processing error: {e}")
         return None
 
-def process_audio_file(uploaded_file) -> str:
-    """Process uploaded audio file and return transcription."""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
-        transcription = whisper_asr(tmp_path)
-        os.unlink(tmp_path)
-        return transcription.get("text", "").strip()
-    except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        return None
-
-# ---------------------------------------------------- Main UI ---------------------------------
+# UI
 st.title("🧓 GoldenPal")
-st.write("Providing companionship in your golden years, GoldenPal will respond with empathy and clear speech to your voice or text input.")
+st.write("Providing companionship in your golden years with empathetic AI responses.")
 
-# Sidebar
 with st.sidebar:
     st.header("ℹ️ About")
-    st.write("This chatbot uses AI to:")
-    st.write("• 🎭 Detect emotions with 28 categories")
-    st.write("• 💬 Respond with empathy and understanding")
-    st.write("• 🎤 Live Voice Input")
-    st.write("• 📊 Better neutral & confusion detection")
-    
+    st.write("• 🎭 Detects 28 emotion categories\n• 💬 Empathetic responses\n• 🎤 Voice input support\n• 📊 Better neutral/confusion detection")
     st.header("🔧 Status")
-    if st.session_state.get('models_loaded', False):
-        st.success("✅ All models loaded")
-    else:
-        st.error("❌ Models not loaded")
-    
-    st.header("🧪 Debug Mode")
-    show_all_emotions = st.checkbox("Show all emotion scores", value=False)
+    st.success("✅ All models loaded" if st.session_state.get('models_loaded') else "❌ Models not loaded")
+    show_debug = st.checkbox("Show all emotion scores", value=False)
 
-# Input methods
 st.subheader("🎤 Live Voice Input")
-audio_bytes = mic_recorder(
-    start_prompt="🎤 Start Recording",
-    stop_prompt="⏹️ Stop Recording",
-    format="wav",
-    just_once=True,
-    key="recorder"
-)
+audio_bytes = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹️ Stop Recording", format="wav", just_once=True, key="recorder")
 
 st.subheader("📁 Upload Audio File")
-uploaded_audio = st.file_uploader(
-    "Choose an audio file",
-    type=['wav', 'mp3', 'flac', 'm4a']
-)
+uploaded_audio = st.file_uploader("Choose an audio file", type=['wav', 'mp3', 'flac', 'm4a'])
 
 st.subheader("⌨️ Text Input")
-user_input = st.text_area(
-    "Type your message here:",
-    height=100,
-    placeholder="Tell me how you're feeling or what's on your mind..."
-)
+user_input = st.text_area("Type your message here:", height=100, placeholder="Tell me how you're feeling or what's on your mind...")
 
-# Submit button
 if st.button("🚀 Submit", type="primary", use_container_width=True):
     final_input = None
 
     if audio_bytes:
         st.info("🎤 Processing mic recording...")
-        final_input = process_audio_bytes(audio_bytes)
+        final_input = process_audio(audio_bytes, is_bytes=True)
         if final_input:
             st.write(f"**Transcribed (mic):** {final_input}")
         else:
@@ -307,7 +176,7 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
 
     elif uploaded_audio:
         st.info("📁 Processing uploaded file...")
-        final_input = process_audio_file(uploaded_audio)
+        final_input = process_audio(uploaded_audio, is_bytes=False)
         if final_input:
             st.write(f"**Transcribed (file):** {final_input}")
         else:
@@ -320,28 +189,23 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
 
     if final_input:
         with st.spinner("🤖 Analyzing your message..."):
-            detected_emotion, confidence, all_emotions = detect_emotion_advanced(final_input)
-            reply = generate_reply(final_input, detected_emotion, confidence)
+            emotion1, emotion2, conf, all_scores = detect_emotion(final_input)
+            reply = generate_reply(final_input, emotion1, emotion2, conf)
 
-        # Show emotion + reply
         col1, col2 = st.columns(2)
-        col1.metric("Detected Emotion", detected_emotion.title())
-        col2.metric("Confidence", f"{confidence:.1%}")
+        emotion_display = f"{emotion1.title()}" + (f" + {emotion2.title()}" if emotion2 else "")
+        col1.metric("Detected Emotion(s)", emotion_display)
+        col2.metric("Confidence", f"{conf:.1%}")
 
-        # Show all emotions in debug mode
-        if show_all_emotions and all_emotions:
-            st.subheader("📊 All Detected Emotions")
-            sorted_emotions = sorted(all_emotions.items(), key=lambda x: x[1], reverse=True)[:5]
-            for emotion, score in sorted_emotions:
-                st.write(f"**{emotion}**: {score:.2%}")
+        if show_debug and all_scores:
+            st.subheader("📊 Top 5 Emotions")
+            for emo, score in sorted(all_scores.items(), key=lambda x: x[1], reverse=True)[:5]:
+                st.write(f"**{emo}**: {score:.2%}")
 
-        st.markdown(
-            f"""
+        st.markdown(f"""
             <div style='font-size:26px; color:#2E8B57; padding:20px; 
             background-color:#f0f8f0; border-radius:10px; 
             border-left: 5px solid #2E8B57;'>
             <strong>{reply}</strong>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            """, unsafe_allow_html=True)
