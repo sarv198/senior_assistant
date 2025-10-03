@@ -100,31 +100,32 @@ def detect_emotion(text):
             scores = {}
         
         if not scores:
-            return "neutral", 0.5, {}
+            return "neutral", None, 0.5, {}
         
-        emotion, conf = max(scores.items(), key=lambda x: x[1])
-
-        # Get top 2 emotions
+        # Get top 2 emotions (sorts by confidence score)
         sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         emotion1, conf1 = sorted_emotions[0]
         emotion2, conf2 = sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0)
         
-        # Check for mixed emotions - if top emotions are close in score, it's complex
+        # ✅ FIRST: Check for mixed emotions and SET A FLAG
+        has_mixed_emotions = False
         if emotion2 and conf2 > 0.25 and (conf1 - conf2) < 0.15:
-            # Emotions are closely scored - this is a complex emotional state
-            pass  # Keep both emotions
+            has_mixed_emotions = True
+            # Keep both emotions - they're closely scored
         
         # Detect life confusion/overwhelm patterns
         overwhelm_words = ['all over the place', 'overwhelmed', 'don\'t know what', 'no clear path', 
                           'confused about', 'lost', 'stuck', 'no direction']
         if any(w in text.lower() for w in overwhelm_words):
-            # Override with confusion if not already top emotion
             if emotion1 not in ['confusion', 'nervousness', 'disappointment']:
                 emotion1 = "confusion"
                 conf1 = max(conf1, 0.75)
+                # ✅ Only clear emotion2 if we DON'T have mixed emotions
+                if not has_mixed_emotions:
+                    emotion2 = None
         
-        # Handle low confidence % for emotions (ex: curiosity, neutral)
-        if conf1 < 0.4:
+        # Handle low confidence
+        if conf1 < 0.4 and not has_mixed_emotions:  # ✅ Added check
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
             emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
             emotion2 = None
@@ -133,22 +134,42 @@ def detect_emotion(text):
         confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
         if any(w in text.lower() for w in confusion_words):
             emotion1, conf1 = "confusion", max(conf1, 0.7)
+            # ✅ Only clear emotion2 if we DON'T have mixed emotions
+            if not has_mixed_emotions:
+                emotion2 = None
         
-        # Detect neutral statements (whcih are very obvious factual statements)
+        # Detect neutral statements
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
         if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
             emotion1, conf1 = "neutral", 0.6
+            emotion2 = None  # Neutral overrides everything
+        
+        # ✅ ALSO: Look for explicit "torn between" or "but" patterns
+        mixed_emotion_phrases = ['torn between', 'but also', 'yet also', 'however', 'on one hand']
+        if any(phrase in text.lower() for phrase in mixed_emotion_phrases):
+            # Force keeping emotion2 if it has reasonable confidence
+            if emotion2 and conf2 > 0.15:  # Lower threshold for explicit mixed statements
+                has_mixed_emotions = True
         
         # Map to response styles
         mapped1 = emotion_map.get(emotion1, 'other')
         mapped1 = mapped1 if mapped1 in response_styles else 'other'
         
+        # Handle secondary emotion
         mapped2 = None
-        if emotion2 and conf2 > 0.2:
+        if emotion2 and conf2 > 0.2:  # ✅ Keep the threshold, but respect has_mixed_emotions
             mapped2 = emotion_map.get(emotion2, 'other')
             mapped2 = mapped2 if mapped2 in response_styles else None
             if mapped2 == mapped1:
                 mapped2 = None
+        
+        # ✅ If we flagged mixed emotions but mapped2 got cleared, try third emotion
+        if has_mixed_emotions and mapped2 is None and len(sorted_emotions) > 2:
+            emotion3, conf3 = sorted_emotions[2]
+            if conf3 > 0.15:
+                mapped3 = emotion_map.get(emotion3, 'other')
+                if mapped3 in response_styles and mapped3 != mapped1:
+                    mapped2 = mapped3
         
         return mapped1, mapped2, conf1, scores
         
@@ -156,9 +177,11 @@ def detect_emotion(text):
         logger.error(f"Emotion detection error: {e}")
         return "neutral", None, 0.5, {}
 
-# response generation function
+# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
+
+    # looks up response style sfor detected emotions 
     try:
         style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
@@ -167,10 +190,11 @@ def generate_reply(text, emotion1, emotion2, conf):
             context = f"The user feels {emotion1} and {emotion2}. {style1} Also, {style2} User said: {text}"
         elif conf < 0.5:
             context = f"Respond naturally and warmly. User said: {text}"
+        # single emotion context
         else:
             context = f"The user feels {emotion1}. {style1} User said: {text}"
         
-
+    # converts text context into readable tokens
         inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
         reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
         reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
