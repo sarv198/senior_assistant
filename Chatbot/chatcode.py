@@ -84,6 +84,7 @@ def detect_emotion(text):
         # Handle both list and dict formats from the classifier
         if isinstance(results, list) and len(results) > 0:
             if isinstance(results[0], list):
+                # Model returns list of lists
                 scores = {item['label']: item['score'] for item in results[0]}
             else:
                 scores = {item['label']: item['score'] for item in results}
@@ -93,44 +94,31 @@ def detect_emotion(text):
         if not scores:
             return "neutral", None, 0.5, {}
         
-        # Get top 2 emotions
-        sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        emotion1, conf1 = sorted_emotions[0]
-        emotion2, conf2 = sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0)
+        emotion, conf = max(scores.items(), key=lambda x: x[1])
         
         # Handle low confidence
-        if conf1 < 0.4:
+        if conf < 0.4:
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
-            emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
-            emotion2 = None
+            emotion = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
         
         # Detect confusion
         confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
         if any(w in text.lower() for w in confusion_words):
-            emotion1, conf1 = "confusion", max(conf1, 0.7)
+            emotion, conf = "confusion", max(conf, 0.7)
         
         # Detect neutral statements (only very obvious factual statements)
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
-        if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
-            emotion1, conf1 = "neutral", 0.6
-            emotion2 = None
+        if any(p in text.lower() for p in neutral_patterns) and conf < 0.4:
+            emotion, conf = "neutral", 0.6
         
+        # Get top 2 emotions
         # Map to response styles
-        mapped1 = emotion_map.get(emotion1, 'other')
-        mapped1 = mapped1 if mapped1 in response_styles else 'other'
-        
-        mapped2 = None
-        if emotion2 and conf2 > 0.2:
-            mapped2 = emotion_map.get(emotion2, 'other')
-            mapped2 = mapped2 if mapped2 in response_styles else None
-            if mapped2 == mapped1:
-                mapped2 = None
-        
-        return mapped1, mapped2, conf1, scores
+        mapped = emotion_map.get(emotion, 'other')
+        return mapped if mapped in response_styles else 'other', conf, scores
         
     except Exception as e:
         logger.error(f"Emotion detection error: {e}")
-        return "neutral", None, 0.5, {}
+        return "neutral", 0.5, {}
 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
@@ -160,14 +148,31 @@ def generate_reply(text, emotion1, emotion2, conf):
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
     try:
+        if audio_data is None:
+            logger.error("Audio data is None")
+            return None
+            
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             tmp.write(audio_data if is_bytes else audio_data.read())
             tmp_path = tmp.name
+        
+        logger.info(f"Processing audio file: {tmp_path}")
+        
+        if whisper is None:
+            logger.error("Whisper model not loaded")
+            os.unlink(tmp_path)
+            return None
+            
         result = whisper(tmp_path)
+        logger.info(f"Transcription result: {result}")
         os.unlink(tmp_path)
-        return result.get("text", "").strip()
+        
+        text = result.get("text", "").strip()
+        logger.info(f"Extracted text: {text}")
+        return text if text else None
+        
     except Exception as e:
-        logger.error(f"Audio processing error: {e}")
+        logger.error(f"Audio processing error: {e}", exc_info=True)
         return None
 
 # UI
@@ -182,26 +187,34 @@ with st.sidebar:
     show_debug = st.checkbox("Show all emotion scores", value=False)
 
 st.subheader("🎤 Live Voice Input")
-audio_bytes = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹️ Stop Recording", format="wav", just_once=True, key="recorder")
+audio_bytes = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹️ Stop Recording", format="wav", just_once=False, key="recorder")
+
+if audio_bytes:
+    st.success(f"✅ Audio recorded: {len(audio_bytes['bytes'])} bytes")
+    if st.button("🎯 Transcribe Recording", type="secondary"):
+        with st.spinner("🎤 Transcribing your voice..."):
+            final_input = process_audio(audio_bytes['bytes'], is_bytes=True)
+            if final_input:
+                st.session_state.transcribed_text = final_input
+                st.success(f"**Transcribed:** {final_input}")
+            else:
+                st.error("❌ Failed to transcribe. Try again or check terminal for errors.")
 
 st.subheader("📁 Upload Audio File")
 uploaded_audio = st.file_uploader("Choose an audio file", type=['wav', 'mp3', 'flac', 'm4a'])
 
 st.subheader("⌨️ Text Input")
-user_input = st.text_area("Type your message here:", height=100, placeholder="Tell me how you're feeling or what's on your mind...")
+user_input = st.text_area(
+    "Type your message here:", 
+    height=100, 
+    placeholder="Tell me how you're feeling or what's on your mind...",
+    value=st.session_state.get('transcribed_text', '')
+)
 
 if st.button("🚀 Submit", type="primary", use_container_width=True):
     final_input = None
 
-    if audio_bytes:
-        st.info("🎤 Processing mic recording...")
-        final_input = process_audio(audio_bytes, is_bytes=True)
-        if final_input:
-            st.write(f"**Transcribed (mic):** {final_input}")
-        else:
-            st.error("❌ Failed to transcribe mic recording.")
-
-    elif uploaded_audio:
+    if uploaded_audio:
         st.info("📁 Processing uploaded file...")
         final_input = process_audio(uploaded_audio, is_bytes=False)
         if final_input:
@@ -212,7 +225,7 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
     elif user_input and user_input.strip():
         final_input = user_input.strip()
     else:
-        st.warning("⚠️ Please provide input (mic, audio file, or text).")
+        st.warning("⚠️ Please provide input (record voice, upload audio file, or type text).")
 
     if final_input:
         with st.spinner("🤖 Analyzing your message..."):
