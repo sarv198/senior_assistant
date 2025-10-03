@@ -69,42 +69,54 @@ def detect_emotion(text):
         # Handle both list and dict formats from the classifier
         if isinstance(results, list) and len(results) > 0:
             if isinstance(results[0], list):
-                # Model returns list of lists
                 scores = {item['label']: item['score'] for item in results[0]}
             else:
-                # Model returns list of dicts
                 scores = {item['label']: item['score'] for item in results}
         else:
             scores = {}
         
         if not scores:
-            return "neutral", 0.5, {}
+            return "neutral", None, 0.5, {}
         
-        emotion, conf = max(scores.items(), key=lambda x: x[1])
+        # Get top 2 emotions
+        sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        emotion1, conf1 = sorted_emotions[0]
+        emotion2, conf2 = sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0)
         
         # Handle low confidence
-        if conf < 0.4:
+        if conf1 < 0.4:
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
-            emotion = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
+            emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
+            emotion2 = None
         
         # Detect confusion
         confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
         if any(w in text.lower() for w in confusion_words):
-            emotion, conf = "confusion", max(conf, 0.7)
+            emotion1, conf1 = "confusion", max(conf1, 0.7)
         
         # Detect neutral statements (only very obvious factual statements)
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
-        if any(p in text.lower() for p in neutral_patterns) and conf < 0.4:
-            emotion, conf = "neutral", 0.6
+        if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
+            emotion1, conf1 = "neutral", 0.6
+            emotion2 = None
         
         # Map to response styles
-        mapped = emotion_map.get(emotion, 'other')
-        return mapped if mapped in response_styles else 'other', conf, scores
+        mapped1 = emotion_map.get(emotion1, 'other')
+        mapped1 = mapped1 if mapped1 in response_styles else 'other'
+        
+        mapped2 = None
+        if emotion2 and conf2 > 0.2:
+            mapped2 = emotion_map.get(emotion2, 'other')
+            mapped2 = mapped2 if mapped2 in response_styles else None
+            if mapped2 == mapped1:
+                mapped2 = None
+        
+        return mapped1, mapped2, conf1, scores
         
     except Exception as e:
         logger.error(f"Emotion detection error: {e}")
-        return "neutral", 0.5, {}
-
+        return "neutral", None, 0.5, {}
+        
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     try:
