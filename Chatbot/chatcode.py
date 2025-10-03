@@ -24,6 +24,21 @@ response_styles = {
     "other": "Offer a gentle, open-ended response."
 }
 
+# Emotion emojis
+emotion_emojis = {
+    "joy": "😊",
+    "sadness": "😢",
+    "anger": "😡",
+    "fear": "😰",
+    "surprise": "😲",
+    "love": "❤️",
+    "confusion": "😕",
+    "optimism": "🌟",
+    "neutral": "😐",
+    "curiosity": "🤔",
+    "other": "💭"
+}
+
 # Emotion mapping from GoEmotions to response styles
 emotion_map = {
     'admiration': 'joy', 'amusement': 'joy', 'anger': 'anger', 'annoyance': 'anger',
@@ -116,7 +131,7 @@ def detect_emotion(text):
     except Exception as e:
         logger.error(f"Emotion detection error: {e}")
         return "neutral", None, 0.5, {}
-        
+
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     try:
@@ -205,7 +220,9 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
             reply = generate_reply(final_input, emotion1, emotion2, conf)
 
         col1, col2 = st.columns(2)
-        emotion_display = f"{emotion1.title()}" + (f" + {emotion2.title()}" if emotion2 else "")
+        emoji1 = emotion_emojis.get(emotion1, "💭")
+        emoji2 = emotion_emojis.get(emotion2, "") if emotion2 else ""
+        emotion_display = f"{emoji1} {emotion1.title()}" + (f" + {emoji2} {emotion2.title()}" if emotion2 else "")
         col1.metric("Detected Emotion(s)", emotion_display)
         col2.metric("Confidence", f"{conf:.1%}")
 
