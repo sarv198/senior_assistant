@@ -1,3 +1,5 @@
+# import necessary libraries (streamlit, huggingface transformers,
+# audio recording, and file handling)
 import streamlit as st
 import os
 import tempfile
@@ -9,7 +11,7 @@ from streamlit_mic_recorder import mic_recorder
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Emotion response styles
+# instructions for how chatbot should respond to different emotions
 response_styles = {
     "joy": "Celebrate with warmth and encouragement.",
     "sadness": "Respond gently, offering comfort and reassurance.",
@@ -24,7 +26,7 @@ response_styles = {
     "other": "Offer a gentle, open-ended response."
 }
 
-# Emotion emojis
+# Visual icons for each emotion
 emotion_emojis = {
     "joy": "😊",
     "sadness": "😢",
@@ -39,7 +41,7 @@ emotion_emojis = {
     "other": "💭"
 }
 
-# Emotion mapping from GoEmotions to response styles
+# Maps the 28 emotions for GoEmotions Dataset to 11 broader categories (above)
 emotion_map = {
     'admiration': 'joy', 'amusement': 'joy', 'anger': 'anger', 'annoyance': 'anger',
     'approval': 'optimism', 'caring': 'love', 'confusion': 'confusion', 'curiosity': 'curiosity',
@@ -50,22 +52,28 @@ emotion_map = {
     'remorse': 'sadness', 'sadness': 'sadness', 'surprise': 'surprise', 'neutral': 'neutral'
 }
 
-st.set_page_config(page_title="Senior Companion Chatbot", layout="centered", initial_sidebar_state="collapsed")
+# set up Streamlit page title, simple layout style and sidebar behaviour
+st.set_page_config(page_title="GoldenPal", layout="centered", initial_sidebar_state="collapsed")
 
+# loads 4 AI models:
+# emotion classifier (transformer from huggingface that uses GoEmotions)
+# chat model (Flan-T5-small good for conversation responses)
+# tokenizer (converts text to model-readable format)
+# Whisper (openai's speech-to-text model)
 @st.cache_resource(show_spinner="Loading models...")
 def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small", torch_dtype=torch.float32, low_cpu_mem_usage=True)
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
         logger.error(f"Model loading error: {e}")
         return None, None, None, None
 
-# Initialize models
+# if models not already loaded, they are loaded once and stored for entire session
 if 'models_loaded' not in st.session_state:
     with st.spinner("Loading AI models..."):
         st.session_state.emotion_clf, st.session_state.tokenizer, st.session_state.chat_model, st.session_state.whisper = load_models()
@@ -76,6 +84,7 @@ tokenizer = st.session_state.tokenizer
 chat_model = st.session_state.chat_model
 whisper = st.session_state.whisper
 
+# function to detect emotion from text
 def detect_emotion(text):
     """Detect emotion with improved neutral/confusion handling."""
     try:
@@ -91,8 +100,10 @@ def detect_emotion(text):
             scores = {}
         
         if not scores:
-            return "neutral", None, 0.5, {}
+            return "neutral", 0.5, {}
         
+        emotion, conf = max(scores.items(), key=lambda x: x[1])
+
         # Get top 2 emotions
         sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         emotion1, conf1 = sorted_emotions[0]
@@ -112,7 +123,7 @@ def detect_emotion(text):
                 emotion1 = "confusion"
                 conf1 = max(conf1, 0.75)
         
-        # Handle low confidence
+        # Handle low confidence % for emotions (ex: curiosity, neutral)
         if conf1 < 0.4:
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
             emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
@@ -123,11 +134,10 @@ def detect_emotion(text):
         if any(w in text.lower() for w in confusion_words):
             emotion1, conf1 = "confusion", max(conf1, 0.7)
         
-        # Detect neutral statements (only very obvious factual statements)
+        # Detect neutral statements (whcih are very obvious factual statements)
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
         if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
             emotion1, conf1 = "neutral", 0.6
-            emotion2 = None
         
         # Map to response styles
         mapped1 = emotion_map.get(emotion1, 'other')
@@ -146,6 +156,7 @@ def detect_emotion(text):
         logger.error(f"Emotion detection error: {e}")
         return "neutral", None, 0.5, {}
 
+# response generation function
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     try:
@@ -159,6 +170,7 @@ def generate_reply(text, emotion1, emotion2, conf):
         else:
             context = f"The user feels {emotion1}. {style1} User said: {text}"
         
+
         inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
         reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
         reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
@@ -271,7 +283,7 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
                 st.write(f"**{emo}**: {score:.2%}")
 
         st.markdown(f"""
-            <div style='font-size:26px; color:#2E8B57; padding:20px; 
+            <div style='font-size:40px; color:#2E8B57; padding:20px; 
             background-color:#f0f8f0; border-radius:10px; 
             border-left: 5px solid #2E8B57;'>
             <strong>{reply}</strong>
