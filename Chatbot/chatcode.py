@@ -146,27 +146,100 @@ def detect_emotion(text):
         logger.error(f"Emotion detection error: {e}")
         return "neutral", None, 0.5, {}
 
+
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     try:
         style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
+        # Build a more conversational prompt that discourages echoing
         if emotion2:
             style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            context = f"The user feels {emotion1} and {emotion2}. {style1} Also, {style2} User said: {text}"
+            context = (
+                f"You are a warm, caring companion having a conversation. "
+                f"The person seems to feel {emotion1} and {emotion2}. {style1} {style2} "
+                f"Respond directly to them in a natural, conversational way without repeating what they said. "
+                f"Their message: {text}\nYour response:"
+            )
         elif conf < 0.5:
-            context = f"Respond naturally and warmly. User said: {text}"
+            context = (
+                f"You are a warm, caring companion. "
+                f"Respond naturally and warmly in your own words. "
+                f"Their message: {text}\nYour response:"
+            )
         else:
-            context = f"The user feels {emotion1}. {style1} User said: {text}"
+            context = (
+                f"You are a warm, caring companion having a conversation. "
+                f"The person seems to feel {emotion1}. {style1} "
+                f"Respond directly to them in a natural way without repeating what they said. "
+                f"Their message: {text}\nYour response:"
+            )
         
+        # Tokenize with appropriate settings
         inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
-        reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        
+        # Generate with adjusted parameters for more natural responses
+        reply_ids = chat_model.generate(
+            **inputs, 
+            max_length=120,  # Slightly longer for complete thoughts
+            min_length=15,   # Ensure substantial responses
+            do_sample=True, 
+            temperature=0.8,  # Slightly higher for more natural variation
+            top_p=0.9,       # Nucleus sampling for better quality
+            repetition_penalty=1.3,  # Discourage repetition
+            no_repeat_ngram_size=3,  # Prevent repeating 3-word phrases
+            pad_token_id=tokenizer.eos_token_id
+        )
         reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
-        if "User said:" in reply:
-            reply = reply.split("User said:")[-1].strip()
+        # More aggressive cleaning to remove echoing
+        # Remove common echo patterns
+        echo_patterns = [
+            "User said:", "Their message:", "Your response:", 
+            "The person", "They said", "You said"
+        ]
+        for pattern in echo_patterns:
+            if pattern in reply:
+                reply = reply.split(pattern)[-1].strip()
         
-        return reply if len(reply.strip()) >= 3 else "I'm here to listen. Tell me more about what's on your mind."
+        # Remove if reply starts by repeating user's text
+        user_words = text.lower().split()[:5]  # First 5 words of user input
+        reply_words = reply.lower().split()[:5]
+        
+        # If the reply starts with similar words to input, it's likely echoing
+        overlap = sum(1 for word in reply_words if word in user_words)
+        if overlap >= 3 and len(reply_words) >= 3:
+            # Try to extract the actual response after the echo
+            sentences = reply.split('.')
+            if len(sentences) > 1:
+                reply = '.'.join(sentences[1:]).strip()
+        
+        # Remove quotes if the model quoted the user
+        reply = reply.replace('"', '').replace("'", "").strip()
+        
+        # Ensure reply doesn't start with repetitive phrases
+        repetitive_starts = [
+            text.lower()[:20],  # First 20 chars of user input
+            "i feel", "i am feeling", "you feel", "you are feeling"
+        ]
+        for start in repetitive_starts:
+            if reply.lower().startswith(start):
+                # Extract everything after the first sentence
+                sentences = reply.split('.')
+                if len(sentences) > 1:
+                    reply = '.'.join(sentences[1:]).strip()
+                break
+        
+        # Ensure quality and length
+        if len(reply.strip()) < 10:
+            return "I'm here for you. What's on your mind right now?"
+        
+        # Make sure reply ends properly
+        if reply and not reply[-1] in '.!?':
+            reply += '.'
+            
+        return reply
+        
     except Exception as e:
         logger.error(f"Reply generation error: {e}")
         return "I'm here to listen and help. Can you tell me more?"
