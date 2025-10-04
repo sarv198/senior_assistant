@@ -178,65 +178,42 @@ def detect_emotion(text):
         return "neutral", None, 0.5, {}
 
 # response generation function using two emotions 
-# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
 
     # looks up response style sfor detected emotions 
     try:
-        style1 = response_styles.get(emotion1.lower(), response_styles["other"])
-        
+        # Simple, direct prompt for BlenderBot
         if emotion2:
-            style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            context = f"You are a warm, caring companion. The person feels {emotion1} and {emotion2}. {style1} {style2} Respond directly to them naturally without repeating what they said. Their message: {text}"
-        elif conf < 0.5:
-            context = f"You are a warm companion. Respond naturally and warmly in your own words to: {text}"
-        # single emotion context
+            prompt = f"Respond warmly to someone feeling {emotion1} and {emotion2}: {text}"
+        elif emotion1 == "neutral":
+            prompt = f"Respond casually: {text}"
         else:
-            context = f"You are a warm, caring companion. The person feels {emotion1}. {style1} Respond directly to them naturally without repeating what they said. Their message: {text}"
+            prompt = f"Respond warmly to someone feeling {emotion1}: {text}"
         
     # converts text context into readable tokens
-        inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
-        reply_ids = chat_model.generate(
-            **inputs, 
-            max_length=120, 
-            min_length=15, 
-            do_sample=True, 
-            temperature=0.8, 
-            top_p=0.9, 
-            repetition_penalty=1.3, 
-            no_repeat_ngram_size=3, 
-            pad_token_id=tokenizer.pad_token_id  # ✅ Changed from eos_token_id
+        inputs = tokenizer(prompt, return_tensors="pt", max_length=128, truncation=True)
+        
+        outputs = chat_model.generate(
+            inputs["input_ids"],
+            max_length=60,
+            do_sample=True,
+            temperature=0.7,
+            pad_token_id=tokenizer.pad_token_id
         )
-        reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
-        if "User said:" in reply:
-            reply = reply.split("User said:")[-1].strip()
+        reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        if "Their message:" in reply:
-            reply = reply.split("Their message:")[-1].strip()
+        # Basic cleaning
+        if len(reply.strip()) < 5:
+            return "I'm here for you. How are you feeling?"
         
-        reply = reply.replace('"', '').replace("'", "").strip()
+        return reply.strip()
         
-        user_words = text.lower().split()[:5]
-        reply_words = reply.lower().split()[:5]
-        overlap = sum(1 for word in reply_words if word in user_words)
-        if overlap >= 3 and len(reply_words) >= 3:
-            sentences = reply.split('.')
-            if len(sentences) > 1:
-                reply = '.'.join(sentences[1:]).strip()
-        
-        if len(reply.strip()) < 10:
-            return "I'm here for you. What's on your mind right now?"
-        
-        if reply and not reply[-1] in '.!?':
-            reply += '.'
-        
-        return reply
     except Exception as e:
-        logger.error(f"Reply generation error: {e}")  # ✅ This will show you the actual error
+        logger.error(f"Reply generation error: {e}", exc_info=True)  # ✅ Added exc_info for full traceback
         return "I'm here to listen and help. Can you tell me more?"
-        
+
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
     try:
