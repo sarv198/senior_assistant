@@ -5,7 +5,7 @@ import os
 import tempfile
 import logging
 import torch
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 from streamlit_mic_recorder import mic_recorder
 
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +65,8 @@ def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
-        chat_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
+        tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small", torch_dtype=torch.float32, low_cpu_mem_usage=True)
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
@@ -190,32 +190,32 @@ def generate_reply(text, emotion1, emotion2, conf):
         # Create context-aware prompt with the user's actual words
         if emotion2:
             style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            prompt = f"Person: {text}\nFriend: I hear you're feeling {emotion1} and {emotion2}."
+            prompt = f"Task: Write a caring response to someone feeling {emotion1} and {emotion2}. {style1} {style2}\nTheir message: {text}\nCaring response:"
         elif emotion1 == "neutral":
-            prompt = f"Person: {text}\nFriend: That sounds"
+            prompt = f"Task: Respond warmly to this casual statement.\nStatement: {text}\nResponse:"
         elif emotion1 == "confusion":
-            prompt = f"Person: {text}\nFriend: It sounds overwhelming. Let's"
+            prompt = f"Task: Provide reassurance to someone feeling overwhelmed. Be gentle and supportive.\nTheir message: {text}\nReassuring response:"
         elif emotion1 == "sadness":
-            prompt = f"Person: {text}\nFriend: I'm sorry you're going through this."
+            prompt = f"Task: Comfort someone who is sad. Be gentle and caring.\nTheir message: {text}\nComforting response:"
         elif emotion1 == "joy":
-            prompt = f"Person: {text}\nFriend: That's wonderful!"
+            prompt = f"Task: Celebrate with someone who is happy.\nTheir message: {text}\nJoyful response:"
         else:
-            prompt = f"Person: {text}\nFriend:"
+            prompt = f"Task: Write a warm, empathetic response to someone feeling {emotion1}. {style1}\nTheir message: {text}\nEmpathetic response:"
         
     # converts text context into readable tokens
-        inputs = tokenizer(prompt, return_tensors="pt")
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
         
         outputs = chat_model.generate(
             inputs["input_ids"],
-            max_length=inputs["input_ids"].shape[1] + 30,
-            pad_token_id=tokenizer.eos_token_id,
+            max_length=80,
             do_sample=True,
-            temperature=0.7,
-            top_p=0.85,
-            repetition_penalty=1.2
+            temperature=0.85,
+            top_p=0.9,
+            repetition_penalty=1.4,
+            pad_token_id=tokenizer.pad_token_id
         )
         
-        reply = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         # Remove incomplete sentences
         if '.' in reply:
