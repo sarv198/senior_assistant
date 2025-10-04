@@ -28,7 +28,7 @@ response_styles = {
 emotion_emojis = {
     "joy": "😊",
     "sadness": "😢",
-    "anger": "😠",
+    "anger": "😡",
     "fear": "😰",
     "surprise": "😲",
     "love": "❤️",
@@ -57,9 +57,8 @@ def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        # Using Flan-T5 instead of BlenderBot - more reliable for empathetic responses
-        tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
@@ -85,60 +84,92 @@ def detect_emotion(text):
         # Handle both list and dict formats from the classifier
         if isinstance(results, list) and len(results) > 0:
             if isinstance(results[0], list):
-                # Model returns list of lists
                 scores = {item['label']: item['score'] for item in results[0]}
             else:
-                # Model returns list of dicts
                 scores = {item['label']: item['score'] for item in results}
         else:
             scores = {}
         
         if not scores:
-            return "neutral", 0.5, {}
+            return "neutral", None, 0.5, {}
         
-        emotion, conf = max(scores.items(), key=lambda x: x[1])
+        # Get top 2 emotions
+        sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        emotion1, conf1 = sorted_emotions[0]
+        emotion2, conf2 = sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0)
+        
+        # Check for mixed emotions - if top emotions are close in score, it's complex
+        if emotion2 and conf2 > 0.25 and (conf1 - conf2) < 0.15:
+            # Emotions are closely scored - this is a complex emotional state
+            pass  # Keep both emotions
+        
+        # Detect life confusion/overwhelm patterns
+        overwhelm_words = ['all over the place', 'overwhelmed', 'don\'t know what', 'no clear path', 
+                          'confused about', 'lost', 'stuck', 'no direction']
+        if any(w in text.lower() for w in overwhelm_words):
+            # Override with confusion if not already top emotion
+            if emotion1 not in ['confusion', 'nervousness', 'disappointment']:
+                emotion1 = "confusion"
+                conf1 = max(conf1, 0.75)
         
         # Handle low confidence
-        if conf < 0.4:
+        if conf1 < 0.4:
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
-            emotion = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
+            emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
+            emotion2 = None
         
         # Detect confusion
         confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
         if any(w in text.lower() for w in confusion_words):
-            emotion, conf = "confusion", max(conf, 0.7)
+            emotion1, conf1 = "confusion", max(conf1, 0.7)
         
         # Detect neutral statements (only very obvious factual statements)
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
-        if any(p in text.lower() for p in neutral_patterns) and conf < 0.4:
-            emotion, conf = "neutral", 0.6
+        if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
+            emotion1, conf1 = "neutral", 0.6
+            emotion2 = None
         
         # Map to response styles
-        mapped = emotion_map.get(emotion, 'other')
-        return mapped if mapped in response_styles else 'other', conf, scores
+        mapped1 = emotion_map.get(emotion1, 'other')
+        mapped1 = mapped1 if mapped1 in response_styles else 'other'
+        
+        mapped2 = None
+        if emotion2 and conf2 > 0.2:
+            mapped2 = emotion_map.get(emotion2, 'other')
+            mapped2 = mapped2 if mapped2 in response_styles else None
+            if mapped2 == mapped1:
+                mapped2 = None
+        
+        return mapped1, mapped2, conf1, scores
         
     except Exception as e:
         logger.error(f"Emotion detection error: {e}")
-        return "neutral", 0.5, {}
+        return "neutral", None, 0.5, {}
 
 def generate_reply(text, emotion1, emotion2, conf):
-    """Generate empathetic reply using Flan-T5 model."""
+    """Generate empathetic reply."""
     try:
-        if chat_model is None or tokenizer is None:
-            return "I'm here to listen and support you."
+        style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
-        # Minimal prompt - let the model be creative
-        prompt = f"Respond empathetically: {text}"
+        if emotion2:
+            style2 = response_styles.get(emotion2.lower(), response_styles["other"])
+            context = f"The user feels {emotion1} and {emotion2}. {style1} Also, {style2} User said: {text}"
+        elif conf < 0.5:
+            context = f"Respond naturally and warmly. User said: {text}"
+        else:
+            context = f"The user feels {emotion1}. {style1} User said: {text}"
         
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=256, truncation=True)
-        outputs = chat_model.generate(**inputs, max_length=150, min_length=30, do_sample=True, temperature=0.9, top_p=0.95)
-        reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
+        reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
-        return reply if len(reply.strip()) >= 10 else "I'm here to listen. Tell me more."
+        if "User said:" in reply:
+            reply = reply.split("User said:")[-1].strip()
         
+        return reply if len(reply.strip()) >= 3 else "I'm here to listen. Tell me more about what's on your mind."
     except Exception as e:
         logger.error(f"Reply generation error: {e}")
-        return "I'm here to listen and help."
+        return "I'm here to listen and help. Can you tell me more?"
 
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
@@ -182,15 +213,8 @@ with st.sidebar:
     show_debug = st.checkbox("Show all emotion scores", value=False)
 
 st.subheader("🎤 Live Voice Input")
-audio_bytes = mic_recorder(
-    start_prompt="🎤 Start Recording", 
-    stop_prompt="⏹️ Stop Recording", 
-    format="wav", 
-    just_once=False,  # Changed to False to allow re-recording
-    key="recorder"
-)
+audio_bytes = mic_recorder(start_prompt="🎤 Start Recording", stop_prompt="⏹️ Stop Recording", format="wav", just_once=False, key="recorder")
 
-# Show status if audio was recorded
 if audio_bytes:
     st.success(f"✅ Audio recorded: {len(audio_bytes['bytes'])} bytes")
     if st.button("🎯 Transcribe Recording", type="secondary"):
