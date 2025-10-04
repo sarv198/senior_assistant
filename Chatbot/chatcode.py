@@ -178,41 +178,22 @@ def detect_emotion(text):
         return "neutral", None, 0.5, {}
 
 # response generation function using two emotions 
+# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
-
     # looks up response style sfor detected emotions 
     try:
-        # Simple, direct prompt for BlenderBot
-        if emotion2:
-            prompt = f"Respond warmly to someone feeling {emotion1} and {emotion2}: {text}"
-        elif emotion1 == "neutral":
-            prompt = f"Respond casually: {text}"
-        else:
-            prompt = f"Respond warmly to someone feeling {emotion1}: {text}"
+        if chat_model is None:
+            return "Model not loaded"
         
-    # converts text context into readable tokens
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=128, truncation=True)
-        
-        outputs = chat_model.generate(
-            inputs["input_ids"],
-            max_length=60,
-            do_sample=True,
-            temperature=0.7,
-            pad_token_id=tokenizer.pad_token_id
-        )
-        
+        inputs = tokenizer(text, return_tensors="pt")
+        outputs = chat_model.generate(inputs["input_ids"], max_length=50)
         reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Basic cleaning
-        if len(reply.strip()) < 5:
-            return "I'm here for you. How are you feeling?"
-        
-        return reply.strip()
+        return reply if reply else "No response generated"
         
     except Exception as e:
-        logger.error(f"Reply generation error: {e}", exc_info=True)  # ✅ Added exc_info for full traceback
-        return "I'm here to listen and help. Can you tell me more?"
+        return f"Error: {str(e)}"
 
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
