@@ -187,30 +187,46 @@ def generate_reply(text, emotion1, emotion2, conf):
         
         style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
+        # Create context-aware prompt with the user's actual words
         if emotion2:
             style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            prompt = f"{style1} {style2} {text}"
+            prompt = f"Person: {text}\nFriend: I hear you're feeling {emotion1} and {emotion2}."
         elif emotion1 == "neutral":
-            prompt = text
+            prompt = f"Person: {text}\nFriend: That sounds"
+        elif emotion1 == "confusion":
+            prompt = f"Person: {text}\nFriend: It sounds overwhelming. Let's"
+        elif emotion1 == "sadness":
+            prompt = f"Person: {text}\nFriend: I'm sorry you're going through this."
+        elif emotion1 == "joy":
+            prompt = f"Person: {text}\nFriend: That's wonderful!"
         else:
-            prompt = f"{style1} {text}"
+            prompt = f"Person: {text}\nFriend:"
         
     # converts text context into readable tokens
-        inputs = tokenizer(prompt + tokenizer.eos_token, return_tensors="pt")
+        inputs = tokenizer(prompt, return_tensors="pt")
         
         outputs = chat_model.generate(
             inputs["input_ids"],
-            max_length=inputs["input_ids"].shape[1] + 50,
+            max_length=inputs["input_ids"].shape[1] + 30,
             pad_token_id=tokenizer.eos_token_id,
             do_sample=True,
-            temperature=0.8,
-            top_p=0.9
+            temperature=0.7,
+            top_p=0.85,
+            repetition_penalty=1.2
         )
         
         reply = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         
+        # Remove incomplete sentences
+        if '.' in reply:
+            sentences = reply.split('.')
+            reply = sentences[0] + '.' if sentences[0] else reply
+        
         if len(reply.strip()) < 5:
-            return "I'm here for you. How are you feeling?"
+            if emotion1 == "confusion": return "It sounds like a lot is happening. What's weighing on you most?"
+            if emotion1 == "sadness": return "I'm here for you during this difficult time."
+            if emotion1 == "joy": return "I'm so happy to hear that!"
+            return "Tell me more about how you're feeling."
         
         return reply.strip()
         
