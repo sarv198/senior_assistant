@@ -65,8 +65,8 @@ def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
@@ -187,22 +187,41 @@ def generate_reply(text, emotion1, emotion2, conf):
         
         if emotion2:
             style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            context = f"The user feels {emotion1} and {emotion2}. {style1} Also, {style2} User said: {text}"
+            context = f"You are a warm, caring companion. The person feels {emotion1} and {emotion2}. {style1} {style2} Respond directly to them naturally without repeating what they said. Their message: {text}"
         elif conf < 0.5:
-            context = f"Respond naturally and warmly. User said: {text}"
+            context = f"You are a warm companion. Respond naturally and warmly in your own words to: {text}"
         # single emotion context
         else:
-            context = f"The user feels {emotion1}. {style1} User said: {text}"
+            context = f"You are a warm, caring companion. The person feels {emotion1}. {style1} Respond directly to them naturally without repeating what they said. Their message: {text}"
         
     # converts text context into readable tokens
         inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
-        reply_ids = chat_model.generate(**inputs, max_length=100, do_sample=True, temperature=0.7, pad_token_id=tokenizer.eos_token_id)
+        reply_ids = chat_model.generate(**inputs, max_length=120, min_length=15, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.3, no_repeat_ngram_size=3, pad_token_id=tokenizer.eos_token_id)
         reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
         if "User said:" in reply:
             reply = reply.split("User said:")[-1].strip()
         
-        return reply if len(reply.strip()) >= 3 else "I'm here to listen. Tell me more about what's on your mind."
+        if "Their message:" in reply:
+            reply = reply.split("Their message:")[-1].strip()
+        
+        reply = reply.replace('"', '').replace("'", "").strip()
+        
+        user_words = text.lower().split()[:5]
+        reply_words = reply.lower().split()[:5]
+        overlap = sum(1 for word in reply_words if word in user_words)
+        if overlap >= 3 and len(reply_words) >= 3:
+            sentences = reply.split('.')
+            if len(sentences) > 1:
+                reply = '.'.join(sentences[1:]).strip()
+        
+        if len(reply.strip()) < 10:
+            return "I'm here for you. What's on your mind right now?"
+        
+        if reply and not reply[-1] in '.!?':
+            reply += '.'
+        
+        return reply
     except Exception as e:
         logger.error(f"Reply generation error: {e}")
         return "I'm here to listen and help. Can you tell me more?"
