@@ -57,7 +57,7 @@ st.set_page_config(page_title="GoldenPal", layout="centered", initial_sidebar_st
 
 # loads 4 AI models:
 # emotion classifier (transformer from huggingface that uses GoEmotions)
-# chat model (Flan-T5-small good for conversation responses)
+# chat model (blenderbot good for conversation responses)
 # tokenizer (converts text to model-readable format)
 # Whisper (openai's speech-to-text model)
 @st.cache_resource(show_spinner="Loading models...")
@@ -178,6 +178,7 @@ def detect_emotion(text):
         return "neutral", None, 0.5, {}
 
 # response generation function using two emotions 
+# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
 
@@ -196,7 +197,17 @@ def generate_reply(text, emotion1, emotion2, conf):
         
     # converts text context into readable tokens
         inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
-        reply_ids = chat_model.generate(**inputs, max_length=120, min_length=15, do_sample=True, temperature=0.8, top_p=0.9, repetition_penalty=1.3, no_repeat_ngram_size=3, pad_token_id=tokenizer.eos_token_id)
+        reply_ids = chat_model.generate(
+            **inputs, 
+            max_length=120, 
+            min_length=15, 
+            do_sample=True, 
+            temperature=0.8, 
+            top_p=0.9, 
+            repetition_penalty=1.3, 
+            no_repeat_ngram_size=3, 
+            pad_token_id=tokenizer.pad_token_id  # ✅ Changed from eos_token_id
+        )
         reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
         if "User said:" in reply:
@@ -223,9 +234,9 @@ def generate_reply(text, emotion1, emotion2, conf):
         
         return reply
     except Exception as e:
-        logger.error(f"Reply generation error: {e}")
+        logger.error(f"Reply generation error: {e}")  # ✅ This will show you the actual error
         return "I'm here to listen and help. Can you tell me more?"
-
+        
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
     try:
