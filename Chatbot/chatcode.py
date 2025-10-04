@@ -179,18 +179,31 @@ def detect_emotion(text):
 
 # response generation function using two emotions 
 # response generation function using two emotions 
+# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     # looks up response style sfor detected emotions 
     try:
-        if chat_model is None:
+        if chat_model is None or tokenizer is None:
             return "Model not loaded"
         
         inputs = tokenizer(text, return_tensors="pt")
-        outputs = chat_model.generate(inputs["input_ids"], max_length=50)
+        outputs = chat_model.generate(
+            inputs["input_ids"], 
+            max_length=50,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+        
+        if len(outputs) == 0:
+            return "No output generated"
+        
         reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        return reply if reply else "No response generated"
+        if not reply or len(reply.strip()) < 3:
+            return "I'm here for you. How are you feeling?"
+        
+        return reply.strip()
         
     except Exception as e:
         return f"Error: {str(e)}"
