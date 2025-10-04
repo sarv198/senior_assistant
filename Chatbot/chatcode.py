@@ -1,3 +1,5 @@
+# import necessary libraries (streamlit, huggingface transformers,
+# audio recording, and file handling)
 import streamlit as st
 import os
 import tempfile
@@ -9,7 +11,7 @@ from streamlit_mic_recorder import mic_recorder
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Emotion response styles
+# instructions for how chatbot should respond to different emotions
 response_styles = {
     "joy": "Celebrate with warmth and encouragement.",
     "sadness": "Respond gently, offering comfort and reassurance.",
@@ -24,7 +26,7 @@ response_styles = {
     "other": "Offer a gentle, open-ended response."
 }
 
-# Emotion emojis
+# Visual icons for each emotion
 emotion_emojis = {
     "joy": "😊",
     "sadness": "😢",
@@ -39,7 +41,7 @@ emotion_emojis = {
     "other": "💭"
 }
 
-# Emotion mapping from GoEmotions to response styles
+# Maps the 28 emotions for GoEmotions Dataset to 11 broader categories (above)
 emotion_map = {
     'admiration': 'joy', 'amusement': 'joy', 'anger': 'anger', 'annoyance': 'anger',
     'approval': 'optimism', 'caring': 'love', 'confusion': 'confusion', 'curiosity': 'curiosity',
@@ -50,22 +52,28 @@ emotion_map = {
     'remorse': 'sadness', 'sadness': 'sadness', 'surprise': 'surprise', 'neutral': 'neutral'
 }
 
-st.set_page_config(page_title="Senior Companion Chatbot", layout="centered", initial_sidebar_state="collapsed")
+# set up Streamlit page title, simple layout style and sidebar behaviour
+st.set_page_config(page_title="GoldenPal", layout="centered", initial_sidebar_state="collapsed")
 
+# loads 4 AI models:
+# emotion classifier (transformer from huggingface that uses GoEmotions)
+# chat model (blenderbot good for conversation responses)
+# tokenizer (converts text to model-readable format)
+# Whisper (openai's speech-to-text model)
 @st.cache_resource(show_spinner="Loading models...")
 def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-small")
+        chat_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-small", torch_dtype=torch.float32, low_cpu_mem_usage=True)
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
         logger.error(f"Model loading error: {e}")
         return None, None, None, None
 
-# Initialize models
+# if models not already loaded, they are loaded once and stored for entire session
 if 'models_loaded' not in st.session_state:
     with st.spinner("Loading AI models..."):
         st.session_state.emotion_clf, st.session_state.tokenizer, st.session_state.chat_model, st.session_state.whisper = load_models()
@@ -76,6 +84,7 @@ tokenizer = st.session_state.tokenizer
 chat_model = st.session_state.chat_model
 whisper = st.session_state.whisper
 
+# function to detect emotion from text
 def detect_emotion(text):
     """Detect emotion with improved neutral/confusion handling."""
     try:
@@ -93,27 +102,30 @@ def detect_emotion(text):
         if not scores:
             return "neutral", None, 0.5, {}
         
-        # Get top 2 emotions
+        # Get top 2 emotions (sorts by confidence score)
         sorted_emotions = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         emotion1, conf1 = sorted_emotions[0]
         emotion2, conf2 = sorted_emotions[1] if len(sorted_emotions) > 1 else (None, 0)
         
-        # Check for mixed emotions - if top emotions are close in score, it's complex
+        # ✅ FIRST: Check for mixed emotions and SET A FLAG
+        has_mixed_emotions = False
         if emotion2 and conf2 > 0.25 and (conf1 - conf2) < 0.15:
-            # Emotions are closely scored - this is a complex emotional state
-            pass  # Keep both emotions
+            has_mixed_emotions = True
+            # Keep both emotions - they're closely scored
         
         # Detect life confusion/overwhelm patterns
         overwhelm_words = ['all over the place', 'overwhelmed', 'don\'t know what', 'no clear path', 
                           'confused about', 'lost', 'stuck', 'no direction']
         if any(w in text.lower() for w in overwhelm_words):
-            # Override with confusion if not already top emotion
             if emotion1 not in ['confusion', 'nervousness', 'disappointment']:
                 emotion1 = "confusion"
                 conf1 = max(conf1, 0.75)
+                # ✅ Only clear emotion2 if we DON'T have mixed emotions
+                if not has_mixed_emotions:
+                    emotion2 = None
         
         # Handle low confidence
-        if conf1 < 0.4:
+        if conf1 < 0.4 and not has_mixed_emotions:  # ✅ Added check
             question_words = ['what', 'when', 'where', 'who', 'why', 'how', 'which', '?']
             emotion1 = "curiosity" if any(w in text.lower() for w in question_words) else "neutral"
             emotion2 = None
@@ -122,23 +134,42 @@ def detect_emotion(text):
         confusion_words = ['confused', 'don\'t understand', 'not sure', 'unclear', 'what do you mean', 'huh']
         if any(w in text.lower() for w in confusion_words):
             emotion1, conf1 = "confusion", max(conf1, 0.7)
+            # ✅ Only clear emotion2 if we DON'T have mixed emotions
+            if not has_mixed_emotions:
+                emotion2 = None
         
-        # Detect neutral statements (only very obvious factual statements)
+        # Detect neutral statements
         neutral_patterns = ['the weather is', 'today is', 'the time is', 'it is located']
         if any(p in text.lower() for p in neutral_patterns) and conf1 < 0.4:
             emotion1, conf1 = "neutral", 0.6
-            emotion2 = None
+            emotion2 = None  # Neutral overrides everything
+        
+        # ✅ ALSO: Look for explicit "torn between" or "but" patterns
+        mixed_emotion_phrases = ['torn between', 'but also', 'yet also', 'however', 'on one hand']
+        if any(phrase in text.lower() for phrase in mixed_emotion_phrases):
+            # Force keeping emotion2 if it has reasonable confidence
+            if emotion2 and conf2 > 0.15:  # Lower threshold for explicit mixed statements
+                has_mixed_emotions = True
         
         # Map to response styles
         mapped1 = emotion_map.get(emotion1, 'other')
         mapped1 = mapped1 if mapped1 in response_styles else 'other'
         
+        # Handle secondary emotion
         mapped2 = None
-        if emotion2 and conf2 > 0.2:
+        if emotion2 and conf2 > 0.2:  # ✅ Keep the threshold, but respect has_mixed_emotions
             mapped2 = emotion_map.get(emotion2, 'other')
             mapped2 = mapped2 if mapped2 in response_styles else None
             if mapped2 == mapped1:
                 mapped2 = None
+        
+        # ✅ If we flagged mixed emotions but mapped2 got cleared, try third emotion
+        if has_mixed_emotions and mapped2 is None and len(sorted_emotions) > 2:
+            emotion3, conf3 = sorted_emotions[2]
+            if conf3 > 0.15:
+                mapped3 = emotion_map.get(emotion3, 'other')
+                if mapped3 in response_styles and mapped3 != mapped1:
+                    mapped2 = mapped3
         
         return mapped1, mapped2, conf1, scores
         
@@ -146,102 +177,61 @@ def detect_emotion(text):
         logger.error(f"Emotion detection error: {e}")
         return "neutral", None, 0.5, {}
 
-
+# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
+    # looks up response style sfor detected emotions 
     try:
+        if chat_model is None or tokenizer is None:
+            return "Models failed to load."
+        
         style1 = response_styles.get(emotion1.lower(), response_styles["other"])
         
-        # Build a more conversational prompt that discourages echoing
+        # Create context-aware prompt with the user's actual words
         if emotion2:
             style2 = response_styles.get(emotion2.lower(), response_styles["other"])
-            context = (
-                f"You are a warm, caring companion having a conversation. "
-                f"The person seems to feel {emotion1} and {emotion2}. {style1} {style2} "
-                f"Respond directly to them in a natural, conversational way without repeating what they said. "
-                f"Their message: {text}\nYour response:"
-            )
-        elif conf < 0.5:
-            context = (
-                f"You are a warm, caring companion. "
-                f"Respond naturally and warmly in your own words. "
-                f"Their message: {text}\nYour response:"
-            )
+            prompt = f"Task: Write a caring response to someone feeling {emotion1} and {emotion2}. {style1} {style2}\nTheir message: {text}\nCaring response:"
+        elif emotion1 == "neutral":
+            prompt = f"Task: Respond warmly to this casual statement.\nStatement: {text}\nResponse:"
+        elif emotion1 == "confusion":
+            prompt = f"Task: Provide reassurance to someone feeling overwhelmed. Be gentle and supportive.\nTheir message: {text}\nReassuring response:"
+        elif emotion1 == "sadness":
+            prompt = f"Task: Comfort someone who is sad. Be gentle and caring.\nTheir message: {text}\nComforting response:"
+        elif emotion1 == "joy":
+            prompt = f"Task: Celebrate with someone who is happy.\nTheir message: {text}\nJoyful response:"
         else:
-            context = (
-                f"You are a warm, caring companion having a conversation. "
-                f"The person seems to feel {emotion1}. {style1} "
-                f"Respond directly to them in a natural way without repeating what they said. "
-                f"Their message: {text}\nYour response:"
-            )
+            prompt = f"Task: Write a warm, empathetic response to someone feeling {emotion1}. {style1}\nTheir message: {text}\nEmpathetic response:"
         
-        # Tokenize with appropriate settings
-        inputs = tokenizer([context], return_tensors="pt", truncation=True, max_length=512)
+    # converts text context into readable tokens
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
         
-        # Generate with adjusted parameters for more natural responses
-        reply_ids = chat_model.generate(
-            **inputs, 
-            max_length=120,  # Slightly longer for complete thoughts
-            min_length=15,   # Ensure substantial responses
-            do_sample=True, 
-            temperature=0.8,  # Slightly higher for more natural variation
-            top_p=0.9,       # Nucleus sampling for better quality
-            repetition_penalty=1.3,  # Discourage repetition
-            no_repeat_ngram_size=3,  # Prevent repeating 3-word phrases
-            pad_token_id=tokenizer.eos_token_id
+        outputs = chat_model.generate(
+            inputs["input_ids"],
+            max_length=80,
+            do_sample=True,
+            temperature=0.85,
+            top_p=0.9,
+            repetition_penalty=1.4,
+            pad_token_id=tokenizer.pad_token_id
         )
-        reply = tokenizer.decode(reply_ids[0], skip_special_tokens=True)
         
-        # More aggressive cleaning to remove echoing
-        # Remove common echo patterns
-        echo_patterns = [
-            "User said:", "Their message:", "Your response:", 
-            "The person", "They said", "You said"
-        ]
-        for pattern in echo_patterns:
-            if pattern in reply:
-                reply = reply.split(pattern)[-1].strip()
+        reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Remove if reply starts by repeating user's text
-        user_words = text.lower().split()[:5]  # First 5 words of user input
-        reply_words = reply.lower().split()[:5]
-        
-        # If the reply starts with similar words to input, it's likely echoing
-        overlap = sum(1 for word in reply_words if word in user_words)
-        if overlap >= 3 and len(reply_words) >= 3:
-            # Try to extract the actual response after the echo
+        # Remove incomplete sentences
+        if '.' in reply:
             sentences = reply.split('.')
-            if len(sentences) > 1:
-                reply = '.'.join(sentences[1:]).strip()
+            reply = sentences[0] + '.' if sentences[0] else reply
         
-        # Remove quotes if the model quoted the user
-        reply = reply.replace('"', '').replace("'", "").strip()
+        if len(reply.strip()) < 5:
+            if emotion1 == "confusion": return "It sounds like a lot is happening. What's weighing on you most?"
+            if emotion1 == "sadness": return "I'm here for you during this difficult time."
+            if emotion1 == "joy": return "I'm so happy to hear that!"
+            return "Tell me more about how you're feeling."
         
-        # Ensure reply doesn't start with repetitive phrases
-        repetitive_starts = [
-            text.lower()[:20],  # First 20 chars of user input
-            "i feel", "i am feeling", "you feel", "you are feeling"
-        ]
-        for start in repetitive_starts:
-            if reply.lower().startswith(start):
-                # Extract everything after the first sentence
-                sentences = reply.split('.')
-                if len(sentences) > 1:
-                    reply = '.'.join(sentences[1:]).strip()
-                break
-        
-        # Ensure quality and length
-        if len(reply.strip()) < 10:
-            return "I'm here for you. What's on your mind right now?"
-        
-        # Make sure reply ends properly
-        if reply and not reply[-1] in '.!?':
-            reply += '.'
-            
-        return reply
+        return reply.strip()
         
     except Exception as e:
-        logger.error(f"Reply generation error: {e}")
+        logger.error(f"Reply error: {e}")
         return "I'm here to listen and help. Can you tell me more?"
 
 def process_audio(audio_data, is_bytes=True):
@@ -344,7 +334,7 @@ if st.button("🚀 Submit", type="primary", use_container_width=True):
                 st.write(f"**{emo}**: {score:.2%}")
 
         st.markdown(f"""
-            <div style='font-size:26px; color:#2E8B57; padding:20px; 
+            <div style='font-size:40px; color:#2E8B57; padding:20px; 
             background-color:#f0f8f0; border-radius:10px; 
             border-left: 5px solid #2E8B57;'>
             <strong>{reply}</strong>
