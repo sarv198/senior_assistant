@@ -5,7 +5,7 @@ import os
 import tempfile
 import logging
 import torch
-from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 from streamlit_mic_recorder import mic_recorder
 
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +65,8 @@ def load_models():
     """Load all AI models."""
     try:
         emotion_clf = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions", device=-1, top_k=None)
-        tokenizer = AutoTokenizer.from_pretrained("facebook/blenderbot-400M-distill")
-        chat_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/blenderbot-400M-distill", torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-small")
+        chat_model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
         whisper = pipeline("automatic-speech-recognition", model="openai/whisper-small", device=-1, chunk_length_s=30)
         return emotion_clf, tokenizer, chat_model, whisper
     except Exception as e:
@@ -178,35 +178,45 @@ def detect_emotion(text):
         return "neutral", None, 0.5, {}
 
 # response generation function using two emotions 
-# response generation function using two emotions 
-# response generation function using two emotions 
 def generate_reply(text, emotion1, emotion2, conf):
     """Generate empathetic reply."""
     # looks up response style sfor detected emotions 
     try:
         if chat_model is None or tokenizer is None:
-            return "Model not loaded"
+            return "Models failed to load."
         
-        inputs = tokenizer(text, return_tensors="pt")
+        style1 = response_styles.get(emotion1.lower(), response_styles["other"])
+        
+        if emotion2:
+            style2 = response_styles.get(emotion2.lower(), response_styles["other"])
+            prompt = f"{style1} {style2} {text}"
+        elif emotion1 == "neutral":
+            prompt = text
+        else:
+            prompt = f"{style1} {text}"
+        
+    # converts text context into readable tokens
+        inputs = tokenizer(prompt + tokenizer.eos_token, return_tensors="pt")
+        
         outputs = chat_model.generate(
-            inputs["input_ids"], 
-            max_length=50,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id
+            inputs["input_ids"],
+            max_length=inputs["input_ids"].shape[1] + 50,
+            pad_token_id=tokenizer.eos_token_id,
+            do_sample=True,
+            temperature=0.8,
+            top_p=0.9
         )
         
-        if len(outputs) == 0:
-            return "No output generated"
+        reply = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         
-        reply = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        if not reply or len(reply.strip()) < 3:
+        if len(reply.strip()) < 5:
             return "I'm here for you. How are you feeling?"
         
         return reply.strip()
         
     except Exception as e:
-        return f"Error: {str(e)}"
+        logger.error(f"Reply error: {e}")
+        return "I'm here to listen and help. Can you tell me more?"
 
 def process_audio(audio_data, is_bytes=True):
     """Process audio and return transcription."""
